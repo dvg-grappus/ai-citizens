@@ -4,6 +4,7 @@ import ClockOverlay from './components/ClockOverlay';
 import ControlsPanel from './components/ControlsPanel';
 import LogPanel from './components/LogPanel';
 import { useWS } from './hooks/useWS';
+import NPCDetailModal from './components/NPCDetailModal';
 import './App.css'; // Ensure this file is present and cleared or has minimal styles
 
 function App() {
@@ -36,6 +37,7 @@ function App() {
       <LogPanel /> {/* LogPanel will define its own width and take full height */}
       <ClockOverlay />
       <ControlsPanel />
+      <NPCDetailModal />
       <div style={{ position: 'fixed', bottom: '5px', left: '5px', color: 'cyan', fontSize: '12px', zIndex: 2000, background: 'black', padding: '2px' }}>
         AC UI - Rev.Clean
       </div>

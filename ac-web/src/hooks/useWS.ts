@@ -38,14 +38,14 @@ export const useWS = () => {
         socketRef.current = socket;
 
         socket.onopen = (event) => {
-            console.log("CLIENT WS: Connection opened!", event);
+            console.log("CLIENT WS: Connection opened!");
             pushLog('Connected to simulation server.');
-            fetchState("onOpen"); // Pass a context for logging
+            fetchState("onOpen");
         };
 
         socket.onclose = (event) => {
-            console.log("CLIENT WS: Connection closed.", event);
-            pushLog(`Disconnected: Code ${event.code}, Reason: '${event.reason}', Clean: ${event.wasClean}`);
+            console.log("CLIENT WS: Connection closed.", event.code, event.reason);
+            pushLog(`Disconnected: Code ${event.code}`);
         };
 
         socket.onerror = (event) => {
@@ -55,19 +55,14 @@ export const useWS = () => {
 
         socket.onmessage = (event) => {
             const rawData = event.data;
-            console.log("CLIENT WS: Raw message received:", rawData);
             try {
                 const messageWrapper = typeof rawData === 'string' ? JSON.parse(rawData) : rawData;
-                console.log("CLIENT WS: Parsed message wrapper:", messageWrapper);
 
                 if (messageWrapper.type === 'tick_update' && messageWrapper.data) {
-                    const tickData = messageWrapper.data;
-                    console.log("CLIENT WS: Tick update received. SimTime:", tickData.new_sim_min, "Day:", tickData.new_day);
-                    fetchState("onTick", tickData.new_sim_min, tickData.new_day);
+                    fetchState("onTick");
                 }
                 else if (messageWrapper.type === 'sim_event' && messageWrapper.data) {
                     const eventData = messageWrapper.data;
-                    console.log("CLIENT WS: Received 'sim_event':", eventData);
                     if (eventData && eventData.description) {
                         let emoji = "⚠️"; 
                         if (eventData.event_code === 'fire_alarm') emoji = "🔥";
@@ -100,16 +95,12 @@ export const useWS = () => {
             }
         };
 
-        const fetchState = async (context: string, tick_sim_min?: number, tick_day?: number) => {
+        const fetchState = async (context: string) => {
             if (!apiUrl) { console.error("CLIENT WS: fetchState - No API URL"); return; }
-            console.log(`CLIENT WS: fetchState() called from [${context}]. Tick info (if any): Day ${tick_day}, Min ${tick_sim_min}`);
             try {
-                console.log("CLIENT WS: fetchState - About to fetch /state");
                 const response = await fetch(`${apiUrl}/state`);
-                console.log("CLIENT WS: fetchState - /state response received, status:", response.status);
                 if (!response.ok) throw new Error(`Fetch /state failed: ${response.status}`);
                 const stateData = await response.json() as BackendState;
-                console.log("CLIENT WS: fetchState - /state JSON parsed. Applying to store.");
 
                 if (stateData.npcs) setNPCs(stateData.npcs);
                 if (stateData.areas) setAreas(stateData.areas);
@@ -117,17 +108,15 @@ export const useWS = () => {
                 if (stateData.sim_clock && stateData.environment) {
                     const totalSimMinutesInDay = stateData.sim_clock.sim_min;
                     const currentDay = stateData.environment.day;
-                    console.log(`CLIENT WS: fetchState - Data for clock update: Day ${currentDay}, Min ${totalSimMinutesInDay}`);
                     const d = dayjs.duration(totalSimMinutesInDay, 'minutes');
                     const hh = d.hours();
                     const mm = d.minutes();
                     setClock({ day: currentDay, hh, mm });
-                    pushLog(`Tick: Day ${currentDay} - ${hh.toString().padStart(2,'0')}:${mm.toString().padStart(2,'0')}`); 
+                    pushLog(`Tick: Day ${currentDay} - ${hh.toString().padStart(2,'0')}:${mm.toString().padStart(2,'0')}`);
                 } else {
                     console.warn("CLIENT WS: fetchState - Clock data incomplete in /state response.");
                     pushLog('Clock data incomplete in /state.');
                 }
-                console.log("CLIENT WS: fetchState - Store updated.");
             } catch (error: any) {
                 console.error('CLIENT WS: Error in fetchState:', error);
                 pushLog(`Error fetching/processing state: ${error.message}`);

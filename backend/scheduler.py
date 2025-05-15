@@ -1,6 +1,7 @@
+print("DEBUG_IMPORT: Starting scheduler.py") # DEBUG
 import asyncio
 import json
-from typing import List, Any, Dict, Set # Added Set
+from typing import List, Any, Dict, Set, Optional # Added Set and Optional
 import re # For parsing plan
 from datetime import date # For sim_date
 import math # Already there, but good to note for sqrt
@@ -8,11 +9,21 @@ import random # For dialogue initiation chance
 from postgrest.exceptions import APIError # Import APIError
 
 # Use relative imports for consistency and to avoid issues if backend is run as a module
-from .services import supa 
-from .config import get_settings
-from .llm import call_llm # Added
-from .prompts import PLAN_SYSTEM_PROMPT_TEMPLATE, PLAN_USER_PROMPT_TEMPLATE, format_traits, REFLECTION_SYSTEM_PROMPT_TEMPLATE, REFLECTION_USER_PROMPT_TEMPLATE, DIALOGUE_SYSTEM_PROMPT_TEMPLATE, DIALOGUE_USER_PROMPT_TEMPLATE # Added
-from .memory_service import retrieve_memories, get_embedding # Added retrieve_memories and get_embedding for plan memory
+print("DEBUG_IMPORT: scheduler.py - About to import from .config, .llm, .prompts, .memory_service, .services") # DEBUG
+try:
+    from .config import get_settings
+    from .llm import call_llm
+    from .prompts import (
+        PLAN_SYSTEM_PROMPT_TEMPLATE, PLAN_USER_PROMPT_TEMPLATE, 
+        REFLECTION_SYSTEM_PROMPT_TEMPLATE, REFLECTION_USER_PROMPT_TEMPLATE, 
+        DIALOGUE_SYSTEM_PROMPT_TEMPLATE, DIALOGUE_USER_PROMPT_TEMPLATE, format_traits
+    )
+    from .memory_service import retrieve_memories, get_embedding 
+    from .services import supa, execute_supabase_query 
+    print("DEBUG_IMPORT: scheduler.py - Successfully imported all dependencies.") # DEBUG
+except ImportError as e:
+    print(f"DEBUG_IMPORT: scheduler.py - IMPORT ERROR: {e}") # DEBUG
+    raise
 
 settings = get_settings()
 _ws_clients: List[Any] = [] # Renamed _ws to _ws_clients for clarity
@@ -24,26 +35,11 @@ db_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DB_OPS)
 NPC_ACTION_LOG_INTERVAL = 10 # Log NPC actions every this many ticks
 RANDOM_CHALLENGE_PROBABILITY = 0.05
 
-async def execute_supabase_query(query_executable_lambda):
-    """Helper to run a Supabase query method (passed as a lambda) with the semaphore."""
-    async with db_semaphore:
-        try:
-            response = await asyncio.to_thread(query_executable_lambda)
-            return response
-        except APIError as e:
-            if e.code == "204" and "maybe_single()" in str(query_executable_lambda):
-                # print(f"DEBUG: execute_supabase_query - Caught 204 No Content for maybe_single") # Silenced for now
-                class EmptyResponse:
-                    def __init__(self): self.data = None; self.error = None; self.status_code = 204; self.count = 0
-                return EmptyResponse()
-            else: print(f"Supabase APIError: {e.code} - {e.message}"); raise
-        except Exception as e_generic: print(f"Supabase Generic Exception: {e_generic}"); raise
-
 async def get_current_sim_time_and_day() -> Dict[str, int]:
     """Fetches current sim_min from sim_clock and day from environment."""
     try:
-        sim_clock_response = await execute_supabase_query(supa.table('sim_clock').select('sim_min').eq('id', 1).maybe_single().execute)
-        environment_response = await execute_supabase_query(supa.table('environment').select('day').eq('id', 1).maybe_single().execute)
+        sim_clock_response = await execute_supabase_query(lambda: supa.table('sim_clock').select('sim_min').eq('id', 1).maybe_single().execute())
+        environment_response = await execute_supabase_query(lambda: supa.table('environment').select('day').eq('id', 1).maybe_single().execute())
         
         sim_clock_data = sim_clock_response.data
         environment_data = environment_response.data
@@ -56,22 +52,25 @@ async def get_current_sim_time_and_day() -> Dict[str, int]:
         print(f"Error fetching sim time and day: {e}")
         return {"sim_min": 0, "day": 1} # Fallback
 
-async def run_daily_planning(current_day: int, current_sim_minutes_total: int):
-    print(f"**** run_daily_planning CALLED for Day {current_day}, SimTotalMin {current_sim_minutes_total} ****") # PROMINENT LOG
-    print(f"PLANNING: Day {current_day} (SimTimeTotal: {current_sim_minutes_total})...")
+async def run_daily_planning(current_day: int, current_sim_minutes_total: int, specific_npc_id: Optional[str] = None):
+    print(f"PLANNING: Day {current_day} (SimTimeTotal: {current_sim_minutes_total}) {'for NPC ' + specific_npc_id if specific_npc_id else 'for ALL NPCs'}")
     try:
-        npcs_response_obj = await execute_supabase_query(lambda: supa.table('npc').select('id, name, traits, backstory').execute())
+        if specific_npc_id:
+            npcs_response_obj = await execute_supabase_query(lambda: supa.table('npc').select('id, name, traits, backstory').eq('id', specific_npc_id).execute()) # Fetch only specific NPC
+        else:
+            npcs_response_obj = await execute_supabase_query(lambda: supa.table('npc').select('id, name, traits, backstory').execute()) # Fetch all NPCs
+        
         if not (npcs_response_obj and npcs_response_obj.data):
-            print("PLANNING: No NPCs found.")
+            print(f"PLANNING: No NPC(s) found {'with ID ' + specific_npc_id if specific_npc_id else ''}.")
             return
-        npcs_data = npcs_response_obj.data
+        npcs_data = npcs_response_obj.data if isinstance(npcs_response_obj.data, list) else [npcs_response_obj.data] # Ensure npcs_data is a list
         sim_date_str = f"Day {current_day}"
         
         all_action_defs_response = await execute_supabase_query(lambda: supa.table('action_def').select('id, title, base_minutes').execute())
         action_defs_data = all_action_defs_response.data or []
         action_defs_map_title_to_id = {ad['title']: ad['id'] for ad in action_defs_data if ad.get('title')}
         action_defs_map_id_to_duration = {ad['id']: ad.get('base_minutes', 30) for ad in action_defs_data if ad.get('id')}
-        print(f"  [ACTION DEF LOAD FULL] Maps created. Titles: {len(action_defs_map_title_to_id)}, Durations: {len(action_defs_map_id_to_duration)}")
+        # print(f"  [ACTION DEF LOAD FULL] Maps created. Titles: {len(action_defs_map_title_to_id)}, Durations: {len(action_defs_map_id_to_duration)}") # REMOVE
 
         # Fetch all available objects once to link actions to them
         all_objects_response = await execute_supabase_query(lambda: supa.table('object').select('id, name, area_id').execute())
@@ -83,7 +82,7 @@ async def run_daily_planning(current_day: int, current_sim_minutes_total: int):
             npc_id = npc['id']; npc_name = npc['name']
             await broadcast_ws_message("planning_event", {"npc_name": npc_name, "status": "started_planning", "day": current_day})
             npc_traits_summary = format_traits(npc.get('traits', []))
-            print(f"  PLANNING for {npc_name} (ID: {npc_id})...")
+            print(f"  PLANNING for {npc_name} (ID: {npc_id})...") # KEEP
 
             planning_query_text = f"What are important considerations for {npc_name} for planning {sim_date_str}?"
             retrieved_memories_str = await retrieve_memories(npc_id, planning_query_text, "planning", current_sim_minutes_total)
@@ -96,7 +95,7 @@ async def run_daily_planning(current_day: int, current_sim_minutes_total: int):
                 print(f"    PLANNING - LLM failed to generate a plan for {npc_name}.")
                 await broadcast_ws_message("planning_event", {"npc_name": npc_name, "status": "failed_planning", "day": current_day})
                 continue
-            print(f"    PLANNING - Raw plan for {npc_name}:\n{raw_plan_text}")
+            # print(f"    FULL - Raw plan for {npc_name}:\n{raw_plan_text}") # REMOVE
 
             plan_action_instance_ids = []
             parsed_actions_for_log = []
@@ -112,7 +111,7 @@ async def run_daily_planning(current_day: int, current_sim_minutes_total: int):
                         continue
                     
                     duration_min = action_defs_map_id_to_duration.get(action_def_id, 30)
-                    print(f"      [PLAN PARSING {npc_name}] Parsed: {action_title}, ID: {action_def_id}, Start: {action_start_sim_min_of_day}, Dur: {duration_min}")
+                    # print(f"      [PLAN PARSING {npc_name}] Parsed: {action_title}, ID: {action_def_id}, Start: {action_start_sim_min_of_day}, Dur: {duration_min}") # REMOVE
 
                     # --- Try to find an object_id for the action ---
                     object_id_for_action = None
@@ -137,7 +136,7 @@ async def run_daily_planning(current_day: int, current_sim_minutes_total: int):
                         'status': 'queued'
                     }
                     action_instance_data_list = [action_instance_data]
-                    print(f"      [PLAN DB {npc_name}] Inserting action_instance for: {action_title}")
+                    # print(f"      [PLAN DB {npc_name}] Inserting action_instance for: {action_title}") # REMOVE
                     
                     # Using the simplified insert first, assuming ID is returned in .data by default
                     def _insert_action_sync(data_list):
@@ -150,7 +149,7 @@ async def run_daily_planning(current_day: int, current_sim_minutes_total: int):
                         if action_instance_id:
                             plan_action_instance_ids.append(action_instance_id)
                             parsed_actions_for_log.append(f"{hh}:{mm} - {action_title}")
-                            print(f"        -> Inserted action_instance ID: {action_instance_id}")
+                            # print(f"        -> Inserted action_instance ID: {action_instance_id}") # REMOVE or make conditional on VERBOSE_DEBUG flag
                         else:
                             print(f"        !!!! Inserted '{action_title}' but ID not in response: {insert_response_obj.data}")
                     else:
@@ -158,20 +157,21 @@ async def run_daily_planning(current_day: int, current_sim_minutes_total: int):
                         print(f"        !!!! Failed to insert '{action_title}'. Error: {db_error}. Data: {insert_response_obj.data}")
             
             if plan_action_instance_ids:
-                print(f"    [PLAN COMMIT {npc_name}] Inserting plan with {len(plan_action_instance_ids)} action IDs.")
+                # print(f"    [PLAN COMMIT {npc_name}] Inserting plan with {len(plan_action_instance_ids)} action IDs.") # REMOVE
+                print(f"    PLANNING - Successfully created plan for {npc_name} with {len(parsed_actions_for_log)} actions.") # KEEP
                 plan_data = {'npc_id': npc_id, 'sim_day': current_day, 'actions': plan_action_instance_ids}
                 await execute_supabase_query(lambda: supa.table('plan').insert(plan_data).execute())
-                print(f"    PLANNING - Successfully created plan for {npc_name}.")
                 
                 plan_memory_content = f"Planned for {sim_date_str}: {len(parsed_actions_for_log)} actions. Details: {'; '.join(parsed_actions_for_log)}"
                 plan_memory_embedding = await get_embedding(plan_memory_content)
                 if plan_memory_embedding:
                     plan_memory_payload = {'npc_id': npc_id, 'sim_min': current_sim_minutes_total, 'kind': 'plan','content': plan_memory_content, 'importance': 3, 'embedding': plan_memory_embedding}
                     await execute_supabase_query(lambda: supa.table('memory').insert(plan_memory_payload).execute())
-                    print(f"      -> PLANNING - Plan memory inserted for {npc_name}.")
+                    # print(f"      -> PLANNING - Plan memory inserted for {npc_name}.") # REMOVE or summarize
 
                 await broadcast_ws_message("planning_event", {"npc_name": npc_name, "status": "completed_planning", "day": current_day, "num_actions": len(parsed_actions_for_log)})
             else:
+                print(f"    PLANNING - No valid action instances for {npc_name}, plan not created.") # KEEP
                 await broadcast_ws_message("planning_event", {"npc_name": npc_name, "status": "failed_planning", "day": current_day})
 
     except Exception as e:
@@ -179,7 +179,7 @@ async def run_daily_planning(current_day: int, current_sim_minutes_total: int):
         import traceback; traceback.print_exc()
 
 async def run_nightly_reflection(day_being_reflected: int, current_sim_minutes_total: int):
-    print(f"REFLECTION: Day {day_being_reflected} (ContextTime: {current_sim_minutes_total})...")
+    print(f"REFLECTION: Day {day_being_reflected} (ContextTime: {current_sim_minutes_total})...") # KEEP
     try:
         npcs_response_obj = await execute_supabase_query(lambda: supa.table('npc').select('id, name, traits').execute())
         if not (npcs_response_obj and npcs_response_obj.data): 
@@ -191,14 +191,14 @@ async def run_nightly_reflection(day_being_reflected: int, current_sim_minutes_t
             npc_id = npc['id']; npc_name = npc['name']
             await broadcast_ws_message("reflection_event", {"npc_name": npc_name, "status": "started_reflection", "day": day_being_reflected})
             npc_traits_summary = format_traits(npc.get('traits', []))
-            print(f"  REFLECTING for {npc_name} (ID: {npc_id})...")
+            print(f"  REFLECTING for {npc_name} (ID: {npc_id})...") # KEEP
             reflection_query_text = f"Key events and main thoughts for {npc_name} on {sim_date_str}?"
             retrieved_memories_str = await retrieve_memories(npc_id, reflection_query_text, "reflection", current_sim_minutes_total)
             system_prompt = REFLECTION_SYSTEM_PROMPT_TEMPLATE.format(name=npc_name, sim_date=sim_date_str)
             user_prompt = REFLECTION_USER_PROMPT_TEMPLATE.format(traits_summary=npc_traits_summary, retrieved_memories=retrieved_memories_str)
             raw_reflection_text = call_llm(system_prompt, user_prompt, max_tokens=300)
             if not raw_reflection_text: continue
-            print(f"    Raw reflection for {npc_name}:\n{raw_reflection_text}")
+            # print(f"    Raw reflection for {npc_name}:\n{raw_reflection_text}") # REMOVE
 
             for line in raw_reflection_text.strip().split('\n'):
                 line = line.strip(); content = line; importance = 1
@@ -390,7 +390,7 @@ async def process_pending_dialogues(current_sim_minutes_total: int):
         pending_dialogue_requests.pop(index)
 
 async def update_npc_actions_and_state(all_npcs_current_data: List[Dict], current_sim_minutes_total: int, actual_current_day: int, new_sim_min_of_day: int, all_areas_data: List[Dict]):
-    print(f"DEBUG: update_npc_actions_and_state for Day {actual_current_day}, Time {new_sim_min_of_day // 60:02d}:{new_sim_min_of_day % 60:02d} (Total: {current_sim_minutes_total})")
+    # No debug logging here
     if not all_npcs_current_data: return
 
     # Get all active action definitions once for emoji/title lookup
@@ -422,97 +422,138 @@ async def update_npc_actions_and_state(all_npcs_current_data: List[Dict], curren
                 action_instance_start_abs = action_planned_day_start_abs + act_inst['start_min']
 
                 if act_inst['status'] == 'active' and (current_sim_minutes_total >= action_instance_start_abs + act_inst['duration_min']):
-                    print(f"    ACTION COMPLETED: {npc_name} finished action {current_action_instance_id}.")
+                    # No logging for completed actions
                     await execute_supabase_query(lambda: supa.table('action_instance').update({'status': 'done'}).eq('id', current_action_instance_id).execute())
                     await execute_supabase_query(lambda: supa.table('npc').update({'current_action_id': None}).eq('id', npc_id).execute())
                     current_action_instance_id = None 
                     action_just_completed = True
             else:
-                print(f"    WARNING: NPC {npc_name} had current_action_id {current_action_instance_id} but instance not found. Clearing.")
+                # Critical warning only
+                print(f"WARNING: NPC {npc_name} had current_action_id {current_action_instance_id} but instance not found in DB.")
                 await execute_supabase_query(lambda: supa.table('npc').update({'current_action_id': None}).eq('id', npc_id).execute())
                 current_action_instance_id = None
                 action_just_completed = True # Treat as if an action just finished
 
         # 2. If no current action OR an action just completed, find and start next scheduled action for *today*
         if not current_action_instance_id:
-            print(f"    Seeking next action for {npc_name} for Day {actual_current_day} at time {new_sim_min_of_day}.")
+            # No logging for action seeking
             plan_response_obj = await execute_supabase_query(lambda: supa.table('plan').select('actions').eq('npc_id', npc_id).eq('sim_day', actual_current_day).maybe_single().execute())
             
+            next_action_to_start = None
             if plan_response_obj and plan_response_obj.data and plan_response_obj.data.get('actions'):
                 action_instance_ids_in_plan = plan_response_obj.data['actions']
-                next_action_to_start = None
                 if action_instance_ids_in_plan:
-                    # Fetch all action instances for this plan, order by start_min ascending
-                    action_instances_res = await execute_supabase_query(
-                        lambda: supa.table('action_instance')
+                    action_instances_res = await execute_supabase_query(lambda: supa.table('action_instance')
                         .select('id, start_min, status, def_id, object_id')
                         .in_('id', action_instance_ids_in_plan)
-                        .order('start_min') # Defaults to ascending, remove asc=True
-                        .execute()
-                    )
-                    print(f"        [UPDATE_NPC] {npc_name}: Fetched action instances: {action_instances_res.data}")
+                        .order('start_min')
+                        .execute())
+                    
                     if action_instances_res and action_instances_res.data:
                         for inst in action_instances_res.data:
-                            print(f"          [UPDATE_NPC] {npc_name}: Checking instance {inst['id']} (status: {inst['status']}, start_min: {inst['start_min']}) against current day_min: {new_sim_min_of_day}")
                             if inst['status'] == 'queued' and new_sim_min_of_day >= inst['start_min']:
                                 next_action_to_start = inst
-                                print(f"            [UPDATE_NPC] {npc_name}: MATCH! Will start: {inst['id']}")
-                                break 
+                                break
+            
+            if next_action_to_start:
+                new_action_instance_id = next_action_to_start['id']
+                new_action_def_id = next_action_to_start.get('def_id')
+                object_id_for_new_action = next_action_to_start.get('object_id')
+                action_details = action_defs_map.get(new_action_def_id, {'title': 'Unknown Action', 'emoji': '❓'})
+                action_title_log = action_details['title']
+                action_emoji_log = action_details['emoji']
+
+                # No logging for action start
+                await execute_supabase_query(lambda: supa.table('action_instance').update({'status': 'active'}).eq('id', new_action_instance_id).execute())
                 
-                if next_action_to_start:
-                    new_action_instance_id = next_action_to_start['id']
-                    new_action_def_id = next_action_to_start.get('def_id')
-                    object_id_for_new_action = next_action_to_start.get('object_id')
-                    action_details = action_defs_map.get(new_action_def_id, {'title': 'Unknown Action', 'emoji': '❓'})
-                    action_title_log = action_details['title']
-                    action_emoji_log = action_details['emoji']
-
-                    print(f"    ACTION START: {npc_name} starting '{action_title_log}' ({new_action_instance_id}). Obj: {object_id_for_new_action}")
-                    await execute_supabase_query(lambda: supa.table('action_instance').update({'status': 'active'}).eq('id', new_action_instance_id).execute())
-                    
-                    new_position_payload = None
-                    if object_id_for_new_action:
-                        obj_res = await execute_supabase_query(lambda: supa.table('object').select('pos, area_id').eq('id', object_id_for_new_action).maybe_single().execute())
-                        if obj_res and obj_res.data and obj_res.data.get('pos') and obj_res.data.get('area_id'):
-                            new_position_payload = {'x': obj_res.data['pos'].get('x'), 'y': obj_res.data['pos'].get('y'), 'areaId': obj_res.data['area_id']}
-                            print(f"      -> Moving {npc_name} to object {object_id_for_new_action} at {new_position_payload}")
-                    
-                    npc_update_payload = {'current_action_id': new_action_instance_id}
-                    if new_position_payload: npc_update_payload['spawn'] = new_position_payload
-                    await execute_supabase_query(lambda: supa.table('npc').update(npc_update_payload).eq('id', npc_id).execute())
-                    
-                    await broadcast_ws_message("action_start", {"npc_name": npc_name, "action_title": action_title_log, "emoji": action_emoji_log, "sim_time": new_sim_min_of_day, "day": actual_current_day})
-                    current_action_instance_id = new_action_instance_id # Ensure this is updated for the current tick
-                    is_idle = False # No longer idle for this tick if an action started
-            # else: # No plan for today
-            #     is_idle = True # Continue to idle wander if no plan
-
-        # 3. If still effectively idle, consider random movement
-        if (not current_action_instance_id or (action_defs_map.get( (await execute_supabase_query(lambda: supa.table('action_instance').select('def_id').eq('id', current_action_instance_id).maybe_single().execute())).data.get('def_id') if current_action_instance_id and (await execute_supabase_query(lambda: supa.table('action_instance').select('def_id').eq('id', current_action_instance_id).maybe_single().execute())).data else None, {}).get('title') == 'Idle')) \
-            and current_position_data and current_position_data.get('areaId') and all_areas_data:
-            if random.random() < 0.25: # Chance for idle wander
-                current_area_id = current_position_data['areaId']
-                new_target_area_id = current_area_id
+                new_position_payload = None
+                if object_id_for_new_action:
+                    obj_res = await execute_supabase_query(lambda: supa.table('object').select('pos, area_id').eq('id', object_id_for_new_action).maybe_single().execute())
+                    if obj_res and obj_res.data and obj_res.data.get('pos') and obj_res.data.get('area_id'):
+                        new_position_payload = {'x': obj_res.data['pos'].get('x'), 'y': obj_res.data['pos'].get('y'), 'areaId': obj_res.data['area_id']}
+                        # No logging for position movement
                 
-                # 10% chance to pick a new area for wandering, otherwise stay in current area
-                if random.random() < 0.10 and len(all_areas_data) > 1:
-                    possible_new_areas = [area for area in all_areas_data if area['id'] != current_area_id]
-                    if possible_new_areas:
-                        new_target_area_id = random.choice(possible_new_areas)['id']
-                        print(f"      -> IDLE WANDER (Area Change): {npc_name} decided to wander from {current_area_id} to {new_target_area_id}")
-
-                target_area_data = next((area for area in all_areas_data if area['id'] == new_target_area_id), None)
+                npc_update_payload = {'current_action_id': new_action_instance_id}
+                if new_position_payload: npc_update_payload['spawn'] = new_position_payload
+                await execute_supabase_query(lambda: supa.table('npc').update(npc_update_payload).eq('id', npc_id).execute())
                 
-                if target_area_data and target_area_data.get('bounds'):
-                    bounds = target_area_data['bounds'] 
-                    padding = 10 
-                    target_x = random.randint(bounds['x'] + padding, bounds['x'] + bounds['w'] - padding)
-                    target_y = random.randint(bounds['y'] + padding, bounds['y'] + bounds['h'] - padding)
+                await broadcast_ws_message("action_start", {"npc_name": npc_name, "action_title": action_title_log, "emoji": action_emoji_log, "sim_time": new_sim_min_of_day, "day": actual_current_day})
+                current_action_instance_id = new_action_instance_id # Update for current tick
+                is_idle = False # Not idle for this tick
 
-                    new_idle_pos_payload = {'x': target_x, 'y': target_y, 'areaId': new_target_area_id}
-                    print(f"      -> IDLE WANDER: {npc_name} in {current_area_id if new_target_area_id == current_area_id else new_target_area_id} targeting {new_idle_pos_payload}")
-                    await execute_supabase_query(lambda: supa.table('npc').update({'spawn': new_idle_pos_payload}).eq('id', npc_id).execute())
-            # else: NPC remains at current idle position
+            else: # No suitable queued action found in the existing plan for the current time.
+                # No logging for idle NPCs
+                # Ensure current_action_id on NPC is None if they truly have nothing from their plan
+                if npc_snapshot.get('current_action_id'): # If they *thought* they had an action but it wasn't suitable
+                    await execute_supabase_query(lambda: supa.table('npc').update({'current_action_id': None}).eq('id', npc_id).execute())
+                current_action_instance_id = None # Explicitly set for the idle wander check below
+                is_idle = True
+
+        # 3. If effectively idle, consider random movement
+        # (The is_truly_idle_for_wander logic from before needs to be re-evaluated based on current_action_instance_id directly)
+        if not current_action_instance_id: # Simpler check: if no action is active, NPC is idle for wandering
+            if current_position_data and current_position_data.get('areaId') and all_areas_data:
+                if random.random() < 0.25: # Idle wander chance
+                    current_area_id = current_position_data.get('areaId')
+                    # Find the area bounds for the current area
+                    current_area_bounds = None
+                    for area in all_areas_data:
+                        if area.get('id') == current_area_id and area.get('bounds'):
+                            current_area_bounds = area.get('bounds')
+                            break
+                    
+                    if current_area_bounds:
+                        # Calculate new random position within the area bounds
+                        # Add some margins to keep NPCs away from the edges
+                        margin = 20
+                        min_x = current_area_bounds.get('x', 0) + margin
+                        max_x = current_area_bounds.get('x', 0) + current_area_bounds.get('w', 100) - margin
+                        min_y = current_area_bounds.get('y', 0) + margin
+                        max_y = current_area_bounds.get('y', 0) + current_area_bounds.get('h', 100) - margin
+                        
+                        # Generate random position within bounds
+                        new_x = random.uniform(min_x, max_x)
+                        new_y = random.uniform(min_y, max_y)
+                        
+                        # Update the NPC's position
+                        new_position = {
+                            'x': new_x,
+                            'y': new_y,
+                            'areaId': current_area_id  # Keep in same area
+                        }
+                        
+                        # No logging for idle movement
+                        await execute_supabase_query(lambda: supa.table('npc').update({'spawn': new_position}).eq('id', npc_id).execute())
+                    else:
+                        # If we couldn't find bounds for the current area, try a random area change (less frequently)
+                        if random.random() < 0.1 and len(all_areas_data) > 1:
+                            # Choose a random different area
+                            available_areas = [area for area in all_areas_data if area.get('id') != current_area_id and area.get('bounds')]
+                            if available_areas:
+                                target_area = random.choice(available_areas)
+                                target_bounds = target_area.get('bounds')
+                                
+                                if target_bounds:
+                                    # Calculate position in new area
+                                    margin = 20
+                                    min_x = target_bounds.get('x', 0) + margin
+                                    max_x = target_bounds.get('x', 0) + target_bounds.get('w', 100) - margin
+                                    min_y = target_bounds.get('y', 0) + margin
+                                    max_y = target_bounds.get('y', 0) + target_bounds.get('h', 100) - margin
+                                    
+                                    # Generate random position within bounds
+                                    new_x = random.uniform(min_x, max_x)
+                                    new_y = random.uniform(min_y, max_y)
+                                    
+                                    # Update the NPC's position
+                                    new_position = {
+                                        'x': new_x,
+                                        'y': new_y,
+                                        'areaId': target_area.get('id')  # Set new area
+                                    }
+                                    
+                                    # No logging for area change
+                                    await execute_supabase_query(lambda: supa.table('npc').update({'spawn': new_position}).eq('id', npc_id).execute())
 
 # Modify advance_tick to pass all_areas_data to update_npc_actions_and_state
 async def advance_tick():
@@ -522,7 +563,7 @@ async def advance_tick():
         env_day_res = await execute_supabase_query(lambda: supa.table('environment').select('day').eq('id', 1).maybe_single().execute()) # Fetch day
         current_sim_min_total_old = time_data_before_tick_res.data.get('sim_min', 0) if time_data_before_tick_res.data else 0
         current_day_old = env_day_res.data.get('day', 1) if env_day_res.data else 1
-        print(f"Tick START: Day {current_day_old}, Min {current_sim_min_total_old}")
+        # print(f"Tick START: Day {current_day_old}, Min {current_sim_min_total_old}") # REMOVE
 
         increment_value = settings.TICK_SIM_MIN
         rpc_params = {'increment_value': increment_value}
@@ -537,7 +578,7 @@ async def advance_tick():
         actual_current_day = new_time_data.get('new_day')
 
         if new_sim_min_of_day is None or actual_current_day is None: return # Should have data from RPC
-        print(f"Tick  END : Day {actual_current_day}, Min {new_sim_min_of_day} (RPC successful)")
+        # print(f"Tick  END : Day {actual_current_day}, Min {new_sim_min_of_day} (RPC successful)") # REMOVE
 
         current_sim_minutes_total = ((actual_current_day - 1) * SIM_DAY_MINUTES) + new_sim_min_of_day
         
@@ -562,7 +603,7 @@ async def advance_tick():
         await spawn_random_challenge(current_sim_minutes_total, actual_current_day)
         
         # Observation Logging (simplified log for now)
-        # print(f"  Observation logging for Day {actual_current_day} - {new_sim_min_of_day // 60:02d}:{new_sim_min_of_day % 60:02d}")
+        # print(f"  Observation logging for Day {actual_current_day} - {new_sim_min_of_day // 60:02d}:{new_sim_min_of_day % 60:02d}") # REMOVE
 
         # 5. WebSocket broadcast
         await broadcast_ws_message("tick_update", {'new_sim_min': new_sim_min_of_day, 'new_day': actual_current_day})
@@ -628,62 +669,21 @@ async def spawn_random_challenge(current_sim_minutes_total: int, current_day: in
 
 # Modify _loop to call spawn_random_challenge
 async def _loop():
-    print("Scheduler _loop STARTED")
+    print("Scheduler _loop STARTED") # KEEP
     loop_count = 0
     while True:
         loop_count += 1
-        # print(f"DEBUG: scheduler._loop() - Iteration {loop_count} - Top of while True") # Can be too noisy
         try:
             await asyncio.sleep(settings.TICK_REAL_SEC)
-            # print(f"DEBUG: scheduler._loop() - Iteration {loop_count} - Woke from sleep, calling advance_tick.")
             await advance_tick()
-            # print(f"DEBUG: scheduler._loop() - Iteration {loop_count} - advance_tick completed.")
-
-            # Periodic NPC Action Log
-            if loop_count % NPC_ACTION_LOG_INTERVAL == 0:
-                print(f"--- NPC Status Update (Tick {loop_count}) ---")
-                npc_statuses_for_frontend = [] # Collect statuses for a single WS message
-                try:
-                    npcs_status_res = await execute_supabase_query(lambda: supa.table('npc').select('id, name, current_action_id').execute()) # Added id
-                    if npcs_status_res and npcs_status_res.data:
-                        for npc_stat in npcs_status_res.data:
-                            action_title = "Idle/None"
-                            npc_name_log = npc_stat.get('name', 'Unknown')
-                            current_action_id_log = npc_stat.get('current_action_id')
-                            emoji_log = "🧍"
-
-                            if current_action_id_log:
-                                action_inst_res = await execute_supabase_query(lambda: supa.table('action_instance').select('def_id').eq('id', current_action_id_log).maybe_single().execute())
-                                if action_inst_res and action_inst_res.data and action_inst_res.data.get('def_id'):
-                                    action_def_id_log = action_inst_res.data['def_id']
-                                    action_def_details = action_defs_map.get(action_def_id_log) # Use pre-fetched action_defs_map if available and passed to _loop or advance_tick context
-                                    # For simplicity, re-fetch here or ensure action_defs_map is accessible
-                                    if not action_defs_map: # Fallback if map not available (should be passed or global)
-                                        action_defs_res_temp = await execute_supabase_query(lambda: supa.table('action_def').select('id, title, emoji').execute())
-                                        action_defs_map_temp = {ad['id']: {'title': ad['title'], 'emoji': ad['emoji']} for ad in (action_defs_res_temp.data or [])}
-                                    else: action_defs_map_temp = action_defs_map # Use existing if passed
-                                    
-                                    if action_def_id_log in action_defs_map_temp:
-                                        action_title = action_defs_map_temp[action_def_id_log]['title']
-                                        emoji_log = action_defs_map_temp[action_def_id_log]['emoji']
-                            
-                            log_line = f"{emoji_log} {npc_name_log}: {action_title}"
-                            print(f"    {log_line} (ID: {current_action_id_log})")
-                            npc_statuses_for_frontend.append(log_line)
-                    else:
-                        print("    Could not fetch NPC statuses for periodic log.")
-                    if npc_statuses_for_frontend:
-                        # Get current time for this log message
-                        time_data = await get_current_sim_time_and_day()
-                        await broadcast_ws_message("npc_status_summary", {"day": time_data['day'], "sim_min_of_day": time_data['sim_min'], "statuses": npc_statuses_for_frontend})
-                except Exception as e_status_log:
-                    print(f"    Error during periodic NPC status log: {e_status_log}")
-                print("-------------------------------------")
-
+            # if loop_count % NPC_ACTION_LOG_INTERVAL == 0: # Temporarily disable periodic status log to backend console
+            #     print(f"--- NPC Status Update (Tick {loop_count}) ---")
+            #     # ... (rest of status log logic)
+            #     print("-------------------------------------")
         except Exception as e_loop:
-            print(f"CRITICAL ERROR IN _loop: {e_loop}") # Changed from DEBUG to CRITICAL
-            import traceback; traceback.print_exc()
-            break
+            print(f"CRITICAL ERROR IN _loop: {e_loop}") # KEEP
+            import traceback; traceback.print_exc() # KEEP
+            break # Keep break to stop a runaway error loop
 
 def start_loop():
     print("Scheduler start_loop CALLED")

@@ -1,11 +1,18 @@
+print("DEBUG_IMPORT: Starting memory_service.py") # DEBUG
 import asyncio
 import math
 import numpy as np
 from typing import List, Dict, Tuple, Literal, Optional
 
-from .services import supa
-from .llm import client as openai_client
-from .config import get_settings
+print("DEBUG_IMPORT: memory_service.py - About to import from .services, .llm, .config") # DEBUG
+try:
+    from .services import supa, execute_supabase_query
+    from .llm import client as openai_client
+    from .config import get_settings
+    print("DEBUG_IMPORT: memory_service.py - Successfully imported all dependencies.") # DEBUG
+except ImportError as e:
+    print(f"DEBUG_IMPORT: memory_service.py - IMPORT ERROR: {e}") # DEBUG
+    raise
 
 settings = get_settings()
 
@@ -57,14 +64,12 @@ async def retrieve_memories(
     w_recency, w_importance, w_similarity = weights
 
     try:
-        memories_response_obj = await asyncio.to_thread(
-            supa.table("memory")
+        memories_response_obj = await execute_supabase_query(lambda: supa.table("memory")
             .select("id, npc_id, sim_min, kind, content, importance, embedding")
             .eq("npc_id", npc_id)
             .order("sim_min", desc=True)
             .limit(MAX_MEMORIES_TO_FETCH)
-            .execute
-        )
+            .execute())
         
         if not memories_response_obj.data:
             return "No memories found."
