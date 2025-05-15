@@ -1,0 +1,80 @@
+import React from 'react';
+import { Stage, Layer, Rect, Text as KonvaText } from 'react-konva';
+import { useSimStore } from '../store/simStore';
+import type { DisplayNPC, DisplayArea } from '../store/simStore';
+import NPCDot from './NPCDot';
+
+// Function to get a color based on NPC ID or name (simple hash for variety)
+const getNPCColor = (id: string): string => {
+    let hash = 0;
+    for (let i = 0; i < id.length; i++) {
+        hash = id.charCodeAt(i) + ((hash << 5) - hash);
+        hash = hash & hash; // Convert to 32bit integer
+    }
+    const color = (hash & 0x00FFFFFF).toString(16).toUpperCase();
+    return "#" + "000000".substring(0, 6 - color.length) + color;
+};
+
+// Define main canvas dimensions - let's aim for a larger fixed size for now
+const STAGE_WIDTH = 800; // Increased
+const STAGE_HEIGHT = 600; // Increased, can be rectangular
+
+// Define how the 4 areas are laid out within this stage
+const AREA_LAYOUT = {
+    rows: 2,
+    cols: 2,
+};
+const AREA_WIDTH = STAGE_WIDTH / AREA_LAYOUT.cols;
+const AREA_HEIGHT = STAGE_HEIGHT / AREA_LAYOUT.rows;
+
+interface DefinedArea {
+    id: string;
+    name: string;
+    bounds: { x: number; y: number; w: number; h: number }; // Explicit bounds structure
+}
+
+const CanvasStage: React.FC = () => {
+    const npcs = useSimStore((state) => state.npcs);
+    // const areasFromStore = useSimStore((state) => state.areas); // Not used if defining areas locally
+
+    const definedAreas: DefinedArea[] = [
+        { id: 'area1', name: 'Bedroom',  bounds: { x: 0, y: 0, w: AREA_WIDTH, h: AREA_HEIGHT } },
+        { id: 'area2', name: 'Office',   bounds: { x: AREA_WIDTH, y: 0, w: AREA_WIDTH, h: AREA_HEIGHT } },
+        { id: 'area3', name: 'Bathroom', bounds: { x: 0, y: AREA_HEIGHT, w: AREA_WIDTH, h: AREA_HEIGHT } },
+        { id: 'area4', name: 'Lounge',   bounds: { x: AREA_WIDTH, y: AREA_HEIGHT, w: AREA_WIDTH, h: AREA_HEIGHT } },
+    ];
+
+    return (
+        <Stage width={STAGE_WIDTH} height={STAGE_HEIGHT} style={{ backgroundColor: '#202020' }}> 
+            <Layer> 
+                {definedAreas.map((area) => (
+                    <React.Fragment key={`area_group_${area.id}`}>
+                        <Rect
+                            x={area.bounds.x} // Now type-safe
+                            y={area.bounds.y}
+                            width={area.bounds.w}
+                            height={area.bounds.h}
+                            stroke="#444"
+                            strokeWidth={1}
+                            fill="#282828"
+                        />
+                        <KonvaText 
+                            text={area.name}
+                            x={area.bounds.x + 10}
+                            y={area.bounds.y + 10}
+                            fontSize={12}
+                            fill="#888"
+                        />
+                    </React.Fragment>
+                ))}
+            </Layer>
+            <Layer> 
+                {npcs.map((npc: DisplayNPC) => (
+                    <NPCDot key={npc.id} npc={npc} color={getNPCColor(npc.id)} />
+                ))}
+            </Layer>
+        </Stage>
+    );
+};
+
+export default CanvasStage;
