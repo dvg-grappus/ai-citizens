@@ -18,7 +18,9 @@ from .prompts import (
 from .memory_service import retrieve_memories, get_embedding 
 from .services import supa, execute_supabase_query
 from .websocket_utils import register_ws, unregister_ws, broadcast_ws_message
-from .planning_and_reflection import run_daily_planning, run_nightly_reflection # ADD THIS IMPORT
+from .planning_and_reflection import run_daily_planning, run_nightly_reflection
+from .dialogue_service import process_pending_dialogues as process_dialogues_ext
+from .dialogue_service import add_pending_dialogue_request as add_dialogue_request_ext
 
 settings = get_settings()
 # _ws_clients: List[Any] = [] # Renamed _ws to _ws_clients for clarity # REMOVE THIS LINE
@@ -58,170 +60,13 @@ async def get_current_sim_time_and_day() -> Dict[str, int]:
 # await broadcast_ws_message("reflection_event", {"npc_name": npc.get('name', 'UNKNOWN'), "status": "error_reflection", "day": day_being_reflected})
 
 # --- Global list for pending dialogues ---
-pending_dialogue_requests: List[Dict[str, Any]] = [] # Stores {npc_a_id, npc_b_id, tick}
+# pending_dialogue_requests: List[Dict[str, Any]] = [] # Stores {npc_a_id, npc_b_id, tick}
 # --- End pending dialogues list ---
 
 # --- Global dict for NPC dialogue cooldowns ---
-npc_dialogue_cooldown_until: Dict[str, int] = {} # npc_id -> sim_min until they can chat again
-DIALOGUE_COOLDOWN_MINUTES = 360 # MODIFIED: Was 20, changed to 6 hours (6 * 60)
+# npc_dialogue_cooldown_until: Dict[str, int] = {} # npc_id -> sim_min until they can chat again
+# DIALOGUE_COOLDOWN_MINUTES = 360 # MODIFIED: Was 20, changed to 6 hours (6 * 60)
 # --- End cooldown dict ---
-
-async def process_pending_dialogues(current_sim_minutes_total: int):
-    print(f"DIALOGUE PROCESSING at tick {current_sim_minutes_total}...")
-    global pending_dialogue_requests # To modify it
-    if not pending_dialogue_requests:
-        return
-
-    print(f"DEBUG: Processing {len(pending_dialogue_requests)} pending dialogue requests at tick {current_sim_minutes_total}.")
-    processed_indices = [] # Store indices of requests that are fully processed (dialogue or not)
-
-    for i, request in enumerate(pending_dialogue_requests):
-        npc_a_id = request['npc_a_id']
-        npc_b_id = request['npc_b_id']
-        npc_a_name = request['npc_a_name']
-        npc_b_name = request['npc_b_name']
-        npc_a_traits = request['npc_a_traits']
-        npc_b_traits = request['npc_b_traits']
-        trigger_event = request['trigger_event']
-        request_tick = request['tick']
-
-        # Check cooldowns (only proceed if request is recent enough to still be relevant & NPCs are not on cooldown)
-        if current_sim_minutes_total > request_tick + DIALOGUE_COOLDOWN_MINUTES: # Stale request
-            processed_indices.append(i)
-            continue
-
-        if npc_dialogue_cooldown_until.get(npc_a_id, 0) > current_sim_minutes_total or \
-           npc_dialogue_cooldown_until.get(npc_b_id, 0) > current_sim_minutes_total:
-            # One or both NPCs on cooldown from a *recent previous* dialogue, but this specific encounter might still proceed if it just happened.
-            # The playbook says "After a dialogue ends, both NPCs ignore further dialogues for ... 20 sim-minutes"
-            # This implies the check should be more about *initiating a new one* if they just finished one.
-            # The active dialogue check in encounter detection should prevent simultaneous ones.
-            # Let's assume for now if they are on cooldown, they don't initiate a *new* dialogue based on this *pending request*.
-            # If they were put on cooldown AFTER this request was added, this check is valid.
-            processed_indices.append(i) # Mark as processed as we won't act on it now
-            continue
-
-        # Dialogue Initiation Chance (Step 5.2.1 of playbook v2)
-        initiation_chance = 0.60 # Base 60%
-        if 'friendly' in npc_a_traits or 'friendly' in npc_b_traits: initiation_chance += 0.15
-        if 'grumpy' in npc_a_traits or 'grumpy' in npc_b_traits: initiation_chance -= 0.15
-        initiation_chance = max(0.1, min(0.9, initiation_chance)) # Clamp between 10% and 90%
-
-        if random.random() < initiation_chance:
-            print(f"  Dialogue initiated between {npc_a_name} and {npc_b_name} (Chance: {initiation_chance:.2f})")
-            dialogue_turns = 3 # Fixed at 3 exchanges (6 lines total) as per playbook
-
-            # Insert dialogue row (Step 5.2.1)
-            dialogue_insert_payload = {'npc_a': npc_a_id, 'npc_b': npc_b_id, 'start_min': current_sim_minutes_total}
-            dialogue_response = await execute_supabase_query(lambda: supa.table('dialogue').insert(dialogue_insert_payload).select('id').execute())
-            
-            if not (dialogue_response and dialogue_response.data and len(dialogue_response.data) > 0):
-                print(f"    !!!! Failed to insert dialogue row for {npc_a_name} & {npc_b_name}. Error: {getattr(dialogue_response, 'error', 'N/A')}")
-                processed_indices.append(i)
-                continue
-            dialogue_id = dialogue_response.data[0]['id']
-            print(f"    Dialogue row inserted, ID: {dialogue_id}")
-
-            # Retrieve memories for dialogue context (Step 5.3.1)
-            # For simplicity, get memories for both and combine, or focus on one if too complex for prompt
-            mem_a = await retrieve_memories(npc_a_id, trigger_event, "dialogue", current_sim_minutes_total)
-            mem_b = await retrieve_memories(npc_b_id, trigger_event, "dialogue", current_sim_minutes_total)
-            combined_memories = f"Memories for {npc_a_name}:\n{mem_a}\n\nMemories for {npc_b_name}:\n{mem_b}"
-
-            # Call LLM for dialogue (Step 5.3.2)
-            dialogue_system_prompt = DIALOGUE_SYSTEM_PROMPT_TEMPLATE.format(num_turns=dialogue_turns * 2) # num_turns is total lines
-            dialogue_user_prompt = DIALOGUE_USER_PROMPT_TEMPLATE.format(
-                npc_a_name=npc_a_name, npc_a_traits=format_traits(npc_a_traits),
-                npc_b_name=npc_b_name, npc_b_traits=format_traits(npc_b_traits),
-                trigger_event=trigger_event, retrieved_memories=combined_memories
-            )
-            raw_dialogue_text = call_llm(dialogue_system_prompt, dialogue_user_prompt, max_tokens=400) # Max tokens for dialogue
-
-            if raw_dialogue_text:
-                print(f"    Raw dialogue:\n{raw_dialogue_text}")
-                # Parse and store turns/memories (Step 5.3.3, 5.3.4)
-                lines = raw_dialogue_text.strip().split('\n')
-                current_speaker_id = npc_a_id # Playbook: dialogue starts with npc_a_name
-                current_speaker_name = npc_a_name
-                other_speaker_id = npc_b_id
-
-                for turn_text in lines:
-                    speaker_match_a = re.match(f"^{re.escape(npc_a_name)}:\s*(.+)", turn_text, re.IGNORECASE)
-                    speaker_match_b = re.match(f"^{re.escape(npc_b_name)}:\s*(.+)", turn_text, re.IGNORECASE)
-                    
-                    parsed_utterance = None
-                    if speaker_match_a:
-                        current_speaker_id = npc_a_id
-                        parsed_utterance = speaker_match_a.group(1).strip()
-                    elif speaker_match_b:
-                        current_speaker_id = npc_b_id
-                        parsed_utterance = speaker_match_b.group(1).strip()
-                    else: # Line doesn't match expected format, try to assign based on alternation or skip
-                        # For simplicity, if format is wrong, we might just log and skip this line
-                        print(f"      Warning: Could not parse speaker from dialogue line: '{turn_text}'")
-                        parsed_utterance = turn_text # Or skip this turn by `continue`
-                        # If we use parsed_utterance, need to decide who spoke it if not clear.
-                        # Let's assume it continues the current_speaker_id for this turn for simplicity if unparsed
-                        if not parsed_utterance.strip(): continue
-
-                    if not parsed_utterance: continue
-
-                    # Insert DialogueTurn
-                    turn_payload = {'dialogue_id': dialogue_id, 'speaker_id': current_speaker_id, 'sim_min': current_sim_minutes_total, 'text': parsed_utterance}
-                    await execute_supabase_query(lambda: supa.table('dialogue_turn').insert(turn_payload).execute())
-                    
-                    # Insert Memory for this utterance
-                    mem_content = f"[Social] {npc_a_name if current_speaker_id == npc_a_id else npc_b_name} said: \"{parsed_utterance}\" during encounter about {trigger_event[:30]}..."
-                    utterance_embedding = await get_embedding(mem_content)
-                    if utterance_embedding:
-                        mem_payload = {'npc_id': current_speaker_id, 'sim_min': current_sim_minutes_total, 'kind': 'obs', 'content': mem_content, 'importance': 2, 'embedding': utterance_embedding}
-                        await execute_supabase_query(lambda: supa.table('memory').insert(mem_payload).execute())
-                        # Also log for the other participant as an observation
-                        other_participant_id = npc_b_id if current_speaker_id == npc_a_id else npc_a_id
-                        mem_payload_other = {'npc_id': other_participant_id, 'sim_min': current_sim_minutes_total, 'kind': 'obs', 'content': mem_content, 'importance': 2, 'embedding': utterance_embedding} # Re-use embedding
-                        await execute_supabase_query(lambda: supa.table('memory').insert(mem_payload_other).execute())
-                    
-                    # Simple alternation for next speaker (if LLM doesn't provide clear speaker tags always)
-                    # current_speaker_id = other_speaker_id 
-                    # current_speaker_name = npc_b_name if current_speaker_id == npc_b_id else npc_a_name
-                    # other_speaker_id = npc_a_id if current_speaker_id == npc_b_id else npc_b_id
-                
-                # Update dialogue.end_min (Step 5.2.5)
-                await execute_supabase_query(lambda: supa.table('dialogue').update({'end_min': current_sim_minutes_total}).eq('id', dialogue_id).execute())
-                print(f"    Dialogue ID {dialogue_id} ended and recorded.")
-
-                # Set cooldowns for both NPCs
-                npc_dialogue_cooldown_until[npc_a_id] = current_sim_minutes_total + DIALOGUE_COOLDOWN_MINUTES
-                npc_dialogue_cooldown_until[npc_b_id] = current_sim_minutes_total + DIALOGUE_COOLDOWN_MINUTES
-                print(f"    NPCs {npc_a_name} & {npc_b_name} on dialogue cooldown until sim_min {npc_dialogue_cooldown_until[npc_a_id]}.")
-
-                # Step 5.4 Post-Dialogue Behaviour (30% chance to replan)
-                # Replan for NPC A
-                if random.random() < 0.30:
-                    print(f"    {npc_a_name} is replanning their day after dialogue.")
-                    # We need the current day number. fetch it or pass it into process_pending_dialogues.
-                    # Let's assume current_day is available or fetched if needed by run_daily_planning.
-                    # run_daily_planning expects (day_number, current_total_sim_minutes_for_context)
-                    # The current_day needs to be the *actual current day* of the simulation.
-                    time_data = await get_current_sim_time_and_day() # Refetch to be sure
-                    day_for_replan = time_data["day"]
-                    await run_daily_planning(day_for_replan, current_sim_minutes_total) 
-                
-                # Replan for NPC B
-                if random.random() < 0.30:
-                    print(f"    {npc_b_name} is replanning their day after dialogue.")
-                    time_data = await get_current_sim_time_and_day() # Refetch to be sure
-                    day_for_replan = time_data["day"]
-                    await run_daily_planning(day_for_replan, current_sim_minutes_total)
-
-            else:
-                print(f"  Dialogue NOT initiated between {npc_a_name} and {npc_b_name} (Chance: {initiation_chance:.2f}, Rolled: {1.0 - initiation_chance:.2f})")
-        
-        processed_indices.append(i) # Mark as processed whether dialogue happened or not
-    
-    # Remove processed requests from pending_dialogue_requests (in reverse order of index to avoid shifting issues)
-    for index in sorted(processed_indices, reverse=True):
-        pending_dialogue_requests.pop(index)
 
 async def update_npc_actions_and_state(all_npcs_data: List[Dict], current_sim_minutes_total: int, actual_current_day: int, new_sim_min_of_day: int, all_areas_data: List[Dict]):
     # No debug logging here
@@ -452,18 +297,62 @@ async def create_area_change_observations(moving_npc_id, moving_npc_name, from_a
         # The moving NPC doesn't need to log "I moved from X to Y"
         
         # Instead, just find NPCs already in the destination area and create memories for both parties
-        for other_npc in all_npcs_data:
-            other_npc_id = other_npc.get('id')
-            other_npc_name = other_npc.get('name', 'Someone')
-            other_npc_position = other_npc.get('spawn', {})
-            other_npc_area_id = other_npc_position.get('areaId')
-            
-            # Skip if this is the same NPC or if the other NPC isn't in the destination area
-            if other_npc_id == moving_npc_id or other_npc_area_id != to_area_id:
+        npcs_in_new_area = [
+            npc for npc in all_npcs_data 
+            if npc.get('spawn', {}).get('area_id') == to_area_id and npc['id'] != moving_npc_id
+        ]
+
+        if not npcs_in_new_area:
+            return
+
+        moving_npc_data = next((n for n in all_npcs_data if n['id'] == moving_npc_id), None)
+        if not moving_npc_data: return
+
+        for other_npc in npcs_in_new_area:
+            # Don't trigger dialogue with self or if one of them is already in an active dialogue.
+            # This check might need refinement if `is_in_dialogue` is not a reliable real-time field.
+            # Or if current_action indicates something that shouldn't be interrupted.
+            if other_npc['id'] == moving_npc_id: # Should be caught by the list comprehension, but double check
                 continue
-                
+
+            # Check if either NPC is currently in an active dialogue already (hypothetical field or check)
+            # if moving_npc_data.get('is_in_dialogue') or other_npc.get('is_in_dialogue'):
+            #     print(f"DEBUG: Skipping encounter between {moving_npc_name} and {other_npc['name']} as one is busy.")
+            #     continue
+            
+            # Simple proximity trigger: if they are in the same area.
+            trigger_event_desc = f"{moving_npc_name} and {other_npc['name']} encountered each other in {other_npc.get('spawn',{}).get('area_name', 'unknown area')}."
+            print(f"ENCOUNTER: {trigger_event_desc}")
+            
+            # Add to pending dialogue requests - USE THE IMPORTED FUNCTION
+            add_dialogue_request_ext(
+                npc_a_id=moving_npc_id,
+                npc_b_id=other_npc['id'],
+                npc_a_name=moving_npc_name,
+                npc_b_name=other_npc['name'],
+                npc_a_traits=[trait.strip() for trait in str(moving_npc_data.get('personality', '')).split(',') if trait.strip()],
+                npc_b_traits=[trait.strip() for trait in str(other_npc.get('personality', '')).split(',') if trait.strip()],
+                trigger_event=trigger_event_desc,
+                current_tick=current_sim_minutes_total # Use current_sim_minutes_total as the tick
+            )
+            # Example of creating an observation for the encounter itself, if not done by dialogue system
+            # encounter_obs_text = f"You encountered {other_npc['name']} in {other_npc.get('spawn',{}).get('area_name', 'unknown area')}."
+            # encounter_embedding = await get_embedding(encounter_obs_text)
+            # if encounter_embedding:
+            #     await execute_supabase_query(lambda: supa.table('memory').insert({
+            #         'npc_id': moving_npc_id, 'sim_min': current_sim_minutes_total, 'kind': 'obs', 
+            #         'content': encounter_obs_text, 'importance': 1, 'embedding': encounter_embedding
+            #     }).execute())
+
+        # Observation for NPCs in the 'from_area' that the moving_npc left
+        npcs_in_old_area = [
+            npc for npc in all_npcs_data 
+            if npc.get('spawn', {}).get('area_id') == from_area_id and npc['id'] != moving_npc_id
+        ]
+
+        for other_npc in npcs_in_old_area:
             # Create observation for the moving NPC noticing someone in the new area
-            moving_sees_other_obs = f"[Social] I saw {other_npc_name} in the {to_area_name}."
+            moving_sees_other_obs = f"[Social] I saw {other_npc['name']} in the {to_area_name}."
             moving_sees_other_embedding = await get_embedding(moving_sees_other_obs)
             if moving_sees_other_embedding:
                 mem_payload = {
@@ -481,7 +370,7 @@ async def create_area_change_observations(moving_npc_id, moving_npc_name, from_a
             other_sees_moving_embedding = await get_embedding(other_sees_moving_obs)
             if other_sees_moving_embedding:
                 mem_payload = {
-                    'npc_id': other_npc_id, 
+                    'npc_id': other_npc['id'], 
                     'sim_min': current_sim_minutes_total, 
                     'kind': 'obs', 
                     'content': other_sees_moving_obs, 
@@ -529,6 +418,18 @@ async def advance_tick():
 
         await update_npc_actions_and_state(all_npcs_data, current_sim_minutes_total, actual_current_day, new_sim_min_of_day, all_areas_data_for_tick)
 
+        # Process pending dialogues using the external service
+        npcs_to_replan_after_dialogue = await process_dialogues_ext(current_sim_minutes_total)
+        if npcs_to_replan_after_dialogue:
+            print(f"Scheduler: {len(npcs_to_replan_after_dialogue)} NPCs need replanning after dialogues: {npcs_to_replan_after_dialogue}")
+            for npc_id_to_replan in npcs_to_replan_after_dialogue:
+                # Check if NPC exists in all_npcs_data before attempting to replan
+                if any(npc['id'] == npc_id_to_replan for npc in all_npcs_data):
+                    print(f"Scheduler: Triggering replan for NPC {npc_id_to_replan} due to dialogue outcome.")
+                    await run_daily_planning(actual_current_day, current_sim_minutes_total, specific_npc_id=npc_id_to_replan)
+                else:
+                    print(f"Scheduler: NPC {npc_id_to_replan} marked for replan not found in current NPC list. Skipping replan.")
+
         # MODIFIED: Split reflection and planning into separate conditions
         # Run reflections at midnight (start of day)
         if new_sim_min_of_day < settings.TICK_SIM_MIN: # True at start of day (00:00 to 00:14 for TICK_SIM_MIN=15)
@@ -548,7 +449,6 @@ async def advance_tick():
         if new_sim_min_of_day == 720 or new_sim_min_of_day == 0:  # 12:00 or 00:00
             await create_plan_adherence_observations(all_npcs_data, current_sim_minutes_total, actual_current_day, new_sim_min_of_day)
             
-        await process_pending_dialogues(current_sim_minutes_total)
         await spawn_random_challenge(current_sim_minutes_total, actual_current_day)
         
         # Observation Logging (simplified log for now)

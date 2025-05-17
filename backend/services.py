@@ -5,6 +5,8 @@ from .config import get_settings # Use relative import
 import random
 from .models import NPCUIDetailData, ActionInfo, ReflectionInfo, MemoryEvent # Import new models
 from postgrest.exceptions import APIError # Add APIError
+import httpx # ADD HTTPOX IMPORT FOR EXCEPTION HANDLING
+import time # ADD TIME IMPORT FOR SLEEP
 
 settings = get_settings()
 
@@ -14,24 +16,68 @@ supa: Client = create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_KE
 MAX_CONCURRENT_DB_OPS = 5 
 db_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DB_OPS)
 
+MAX_RETRIES = 3
+INITIAL_BACKOFF_SECONDS = 0.5
+
+# Define a set of httpx exceptions that might be worth retrying
+RETRYABLE_HTTPX_EXCEPTIONS = (
+    httpx.ReadError,
+    httpx.ConnectError,
+    httpx.TimeoutException, # Includes ConnectTimeout, ReadTimeout, WriteTimeout, PoolTimeout
+    httpx.NetworkError # Generic network error
+)
+
 async def execute_supabase_query(query_executable_lambda):
-    """Helper to run a Supabase query method (passed as a lambda) with the semaphore."""
-    async with db_semaphore:
-        try:
-            response = await asyncio.to_thread(query_executable_lambda)
-            return response
-        except APIError as e:
-            if str(e.code) == "204": 
-                class EmptyResponse:
-                    def __init__(self):
-                        self.data = None; self.error = None; self.status_code = 204; self.count = None
-                return EmptyResponse()
-            else:
-                print(f"Supabase APIError in services.execute_supabase_query (Code: {e.code}): {e.message}")
-                raise 
-        except Exception as e_generic:
-            print(f"Supabase Generic Exception in services.execute_supabase_query: {e_generic}")
-            raise
+    """Helper to run a Supabase query method (passed as a lambda) with semaphore and retries."""
+    last_exception = None
+    for attempt in range(MAX_RETRIES):
+        async with db_semaphore:
+            try:
+                response = await asyncio.to_thread(query_executable_lambda)
+                return response
+            except APIError as e:
+                if str(e.code) == "204": 
+                    class EmptyResponse:
+                        def __init__(self):
+                            self.data = None; self.error = None; self.status_code = 204; self.count = None
+                    return EmptyResponse()
+                else:
+                    print(f"Supabase APIError in services.execute_supabase_query (Code: {e.code}, Attempt: {attempt + 1}/{MAX_RETRIES}): {e.message}")
+                    last_exception = e
+                    # Decide if this specific APIError is retryable, e.g., based on code or message
+                    # For now, assume most APIErrors are not transient unless specifically handled
+                    if attempt == MAX_RETRIES - 1: raise
+                    # If retryable, let it fall through to the sleep logic, otherwise re-raise immediately
+                    # For now, we'll just re-raise non-204 APIErrors without retry unless they are wrapped by an httpx error.
+                    # This part might need refinement based on observed APIError codes that are transient.
+                    raise # Re-raise APIError if not a 204, no retry for these by default yet.
+            
+            except RETRYABLE_HTTPX_EXCEPTIONS as e_httpx:
+                print(f"Supabase query failed with retryable HTTPX error (Attempt {attempt + 1}/{MAX_RETRIES}): {type(e_httpx).__name__} - {e_httpx}")
+                last_exception = e_httpx
+                if attempt < MAX_RETRIES - 1:
+                    backoff_time = INITIAL_BACKOFF_SECONDS * (2 ** attempt)
+                    print(f"Retrying in {backoff_time:.2f} seconds...")
+                    await asyncio.sleep(backoff_time) # Use asyncio.sleep for async code
+                else:
+                    print(f"Max retries reached for HTTPX error.")
+                    raise # Re-raise the last httpx exception
+            
+            except Exception as e_generic:
+                print(f"Supabase Generic Exception in services.execute_supabase_query (Attempt: {attempt + 1}/{MAX_RETRIES}): {type(e_generic).__name__} - {e_generic}")
+                last_exception = e_generic
+                # For truly generic exceptions, usually not safe to retry unless known to be transient.
+                # If the generic exception was caused by an httpx.ReadError [Errno 35], our RETRYABLE_HTTPX_EXCEPTIONS should catch it.
+                # If it's something else, re-raise immediately.
+                raise # Re-raise generic exception immediately
+
+    # This part should ideally not be reached if exceptions are re-raised properly in the loop
+    if last_exception:
+        print("Raising last recorded exception after all retries failed.")
+        raise last_exception
+    # Fallback, though logically an error should have been raised or a response returned.
+    raise Exception("execute_supabase_query finished all retries without success or explicit error.")
+
 # --- End Semaphore and DB Execution Helper ---
 
 print("DEBUG_IMPORT: services.py - supa, semaphore, execute_supabase_query DEFINED.") # DEBUG

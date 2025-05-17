@@ -6,7 +6,6 @@ import LogPanel from './components/LogPanel';
 import ChatBox from './components/ChatBox';
 import { useWS } from './hooks/useWS';
 import NPCDetailModal from './components/NPCDetailModal';
-import './App.css'; // Ensure this file is present and cleared or has minimal styles
 
 function App() {
   useWS(); // Initialize WebSocket connection

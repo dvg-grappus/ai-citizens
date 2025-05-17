@@ -2,7 +2,6 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';
 import './index.css'; // Standard Vite CSS. Should exist from scaffolding.
-import './App.css';   // Custom App CSS. We cleared this earlier.
 
 const rootElement = document.getElementById('root');
 
