@@ -7,7 +7,6 @@ import './App.css';   // Custom App CSS. We cleared this earlier.
 const rootElement = document.getElementById('root');
 
 if (rootElement) {
-  console.log("main.tsx: Rendering App... (NO StrictMode for testing)");
   ReactDOM.createRoot(rootElement).render(
     // <React.StrictMode> // Temporarily commented out
     <App />

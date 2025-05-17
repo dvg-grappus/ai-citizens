@@ -1,4 +1,3 @@
-print("DEBUG_IMPORT: Starting scheduler.py") # DEBUG
 import asyncio
 import json
 from typing import List, Any, Dict, Set, Optional # Added Set and Optional
@@ -9,21 +8,15 @@ import random # For dialogue initiation chance
 from postgrest.exceptions import APIError # Import APIError
 
 # Use relative imports for consistency and to avoid issues if backend is run as a module
-print("DEBUG_IMPORT: scheduler.py - About to import from .config, .llm, .prompts, .memory_service, .services") # DEBUG
-try:
-    from .config import get_settings
-    from .llm import call_llm
-    from .prompts import (
-        PLAN_SYSTEM_PROMPT_TEMPLATE, PLAN_USER_PROMPT_TEMPLATE, 
-        REFLECTION_SYSTEM_PROMPT_TEMPLATE, REFLECTION_USER_PROMPT_TEMPLATE, 
-        DIALOGUE_SYSTEM_PROMPT_TEMPLATE, DIALOGUE_USER_PROMPT_TEMPLATE, format_traits
-    )
-    from .memory_service import retrieve_memories, get_embedding 
-    from .services import supa, execute_supabase_query 
-    print("DEBUG_IMPORT: scheduler.py - Successfully imported all dependencies.") # DEBUG
-except ImportError as e:
-    print(f"DEBUG_IMPORT: scheduler.py - IMPORT ERROR: {e}") # DEBUG
-    raise
+from .config import get_settings
+from .llm import call_llm
+from .prompts import (
+    PLAN_SYSTEM_PROMPT_TEMPLATE, PLAN_USER_PROMPT_TEMPLATE, 
+    REFLECTION_SYSTEM_PROMPT_TEMPLATE, REFLECTION_USER_PROMPT_TEMPLATE, 
+    DIALOGUE_SYSTEM_PROMPT_TEMPLATE, DIALOGUE_USER_PROMPT_TEMPLATE, format_traits
+)
+from .memory_service import retrieve_memories, get_embedding 
+from .services import supa, execute_supabase_query
 
 settings = get_settings()
 _ws_clients: List[Any] = [] # Renamed _ws to _ws_clients for clarity
@@ -53,7 +46,7 @@ async def get_current_sim_time_and_day() -> Dict[str, int]:
         return {"sim_min": 0, "day": 1} # Fallback
 
 async def run_daily_planning(current_day: int, current_sim_minutes_total: int, specific_npc_id: Optional[str] = None):
-    print(f"PLANNING: Day {current_day} (SimTimeTotal: {current_sim_minutes_total}) {'for NPC ' + specific_npc_id if specific_npc_id else 'for ALL NPCs'}")
+    print(f"PLANNING: Day {current_day} (5:00 AM) {'for NPC ' + specific_npc_id if specific_npc_id else 'for ALL NPCs'}")
     try:
         if specific_npc_id:
             npcs_response_obj = await execute_supabase_query(lambda: supa.table('npc').select('id, name, traits, backstory').eq('id', specific_npc_id).execute()) # Fetch only specific NPC
@@ -125,6 +118,15 @@ async def run_daily_planning(current_day: int, current_sim_minutes_total: int, s
                     elif action_title == "Brush Teeth":
                         toothbrush_objects = [obj for obj in all_objects_data if obj.get('name') == "Toothbrush"]
                         if toothbrush_objects: object_id_for_action = toothbrush_objects[0]['id']
+                    elif action_title == "Watch TV":
+                        tv_objects = [obj for obj in all_objects_data if obj.get('name') == "TV"]
+                        if tv_objects: object_id_for_action = tv_objects[0]['id']
+                    elif action_title == "Relax on Couch":
+                        couch_objects = [obj for obj in all_objects_data if obj.get('name') == "Couch"]
+                        if couch_objects: object_id_for_action = couch_objects[0]['id']
+                    elif action_title == "Have Coffee":
+                        coffee_table_objects = [obj for obj in all_objects_data if obj.get('name') == "Coffee Table"]
+                        if coffee_table_objects: object_id_for_action = coffee_table_objects[0]['id']
                     # Add more specific object associations here if needed for other actions
 
                     action_instance_data = {
@@ -179,7 +181,7 @@ async def run_daily_planning(current_day: int, current_sim_minutes_total: int, s
         import traceback; traceback.print_exc()
 
 async def run_nightly_reflection(day_being_reflected: int, current_sim_minutes_total: int):
-    print(f"REFLECTION: Day {day_being_reflected} (ContextTime: {current_sim_minutes_total})...") # KEEP
+    print(f"REFLECTION: Day {day_being_reflected} (12:00 AM Midnight) ...")
     try:
         npcs_response_obj = await execute_supabase_query(lambda: supa.table('npc').select('id, name, traits').execute())
         if not (npcs_response_obj and npcs_response_obj.data): 
@@ -191,34 +193,111 @@ async def run_nightly_reflection(day_being_reflected: int, current_sim_minutes_t
             npc_id = npc['id']; npc_name = npc['name']
             await broadcast_ws_message("reflection_event", {"npc_name": npc_name, "status": "started_reflection", "day": day_being_reflected})
             npc_traits_summary = format_traits(npc.get('traits', []))
-            print(f"  REFLECTING for {npc_name} (ID: {npc_id})...") # KEEP
+            print(f"  REFLECTING for {npc_name} (ID: {npc_id})...")
+            
+            # Skip memory check debug logs
+            memories_check = await execute_supabase_query(lambda: supa.table('memory')
+                .select('id, kind')
+                .eq('npc_id', npc_id)
+                .eq('kind', 'obs')
+                .order('sim_min', desc=True)
+                .limit(5)
+                .execute())
+            
             reflection_query_text = f"Key events and main thoughts for {npc_name} on {sim_date_str}?"
             retrieved_memories_str = await retrieve_memories(npc_id, reflection_query_text, "reflection", current_sim_minutes_total)
+            
+            # Skip retrieved memories debug logs
             system_prompt = REFLECTION_SYSTEM_PROMPT_TEMPLATE.format(name=npc_name, sim_date=sim_date_str)
             user_prompt = REFLECTION_USER_PROMPT_TEMPLATE.format(traits_summary=npc_traits_summary, retrieved_memories=retrieved_memories_str)
-            raw_reflection_text = call_llm(system_prompt, user_prompt, max_tokens=300)
-            if not raw_reflection_text: continue
-            # print(f"    Raw reflection for {npc_name}:\n{raw_reflection_text}") # REMOVE
-
+            
+            # Call LLM with minimal logging
+            raw_reflection_text = call_llm(system_prompt, user_prompt, max_tokens=300, model="gpt-4o")
+            
+            # Check LLM response
+            if not raw_reflection_text:
+                print(f"  ERROR: LLM returned empty or null response for {npc_name}'s reflection!")
+                continue
+            
+            # Skip printing the full reflection text
+            
+            # Check if the reflection text has any bullet points
+            if '•' not in raw_reflection_text:
+                print(f"  ERROR: No bullet points (•) found in reflection text! Trying to adapt format...")
+                # Try alternative formats - maybe the LLM used different bullet formats
+                lines = raw_reflection_text.strip().split('\n')
+                formatted_lines = []
+                for line in lines:
+                    # Check if it's a numbered line (1. 2. etc)
+                    if re.match(r'^\d+\.', line.strip()):
+                        formatted_lines.append(f"• {line.strip()}")
+                    # Or starts with - or * (common bullet formats)
+                    elif line.strip().startswith('-') or line.strip().startswith('*'):
+                        formatted_lines.append(f"• {line.strip()[1:].strip()}")
+                    elif line.strip():  # Not empty
+                        formatted_lines.append(f"• {line.strip()}")
+                
+                if formatted_lines:
+                    raw_reflection_text = '\n'.join(formatted_lines)
+            
+            reflection_count = 0
             for line in raw_reflection_text.strip().split('\n'):
-                line = line.strip(); content = line; importance = 1
-                if not line.startswith('•'): continue
+                line = line.strip()
+                if not line: continue
+                
+                content = line
+                importance = 1  # Default importance
+                
+                # Check if line starts with a bullet point - skip verbose logging
+                if not line.startswith('•'):
+                    # Try to handle the case where LLM didn't follow format
+                    if line.startswith('-') or line.startswith('*') or re.match(r'^\d+\.', line):
+                        pass # Process anyway
+                    else:
+                        continue # Skip non-bullet lines
+                
+                # Extract importance if present
                 match = re.search(r"\[Importance:\s*(\d+)\]$", line, re.IGNORECASE)
                 if match: 
-                    try: importance = max(1, min(5, int(match.group(1)))); content = re.sub(r"\s*\[Importance:\s*\d+\]$", "", line, flags=re.IGNORECASE).strip()
-                    except ValueError: pass # Keep default importance if parsing fails
-                content = content.lstrip('• ').strip()
+                    try: 
+                        importance = max(1, min(5, int(match.group(1))))
+                        content = re.sub(r"\s*\[Importance:\s*\d+\]$", "", line, flags=re.IGNORECASE).strip()
+                    except ValueError:
+                        pass # Keep default importance if parsing fails
+                else:
+                    # Try alternative format that might be used
+                    alt_match = re.search(r"\(Importance:?\s*(\d+)\)", line, re.IGNORECASE)
+                    if alt_match:
+                        try:
+                            importance = max(1, min(5, int(alt_match.group(1))))
+                            content = re.sub(r"\s*\(Importance:?\s*\d+\)", "", line, flags=re.IGNORECASE).strip()
+                        except ValueError:
+                            pass
+                
+                # Clean up the content
+                content = content.lstrip('• ').lstrip('- ').lstrip('* ').lstrip('1. ').lstrip('2. ').lstrip('3. ').strip()
                 if not content: continue
+                
                 reflection_embedding = await get_embedding(content)
                 if reflection_embedding:
                     payload = {'npc_id': npc_id, 'sim_min': current_sim_minutes_total, 'kind': 'reflect','content': content, 'importance': importance, 'embedding': reflection_embedding}
-                    print(f"    [REFLECTION DB] About to insert reflection memory: {payload}")
-                    reflection_insert_response = await execute_supabase_query(lambda: supa.table('memory').insert(payload).execute())
-                    if reflection_insert_response.data and len(reflection_insert_response.data) > 0:
-                        print(f"    Stored reflection: '{content}' (Importance: {importance}). Data: {reflection_insert_response.data}")
-                    else:
-                        print(f"        !!!! Failed to store reflection for '{content}'. No data. Status: {getattr(reflection_insert_response, 'status_code', 'N/A')}")
-
+                    
+                    try:
+                        reflection_insert_response = await execute_supabase_query(lambda: supa.table('memory').insert(payload).execute())
+                        
+                        if reflection_insert_response.data and len(reflection_insert_response.data) > 0:
+                            reflection_count += 1
+                        else:
+                            print(f"  ERROR: Failed to store reflection. No data returned.")
+                            if hasattr(reflection_insert_response, 'error') and reflection_insert_response.error:
+                                print(f"  ERROR DETAILS: {reflection_insert_response.error}")
+                    except Exception as insert_err:
+                        print(f"  ERROR: Exception during reflection insert: {insert_err}")
+                else:
+                    print(f"  ERROR: Failed to get embedding for reflection content")
+            
+            # Summary
+            print(f"  SUMMARY: Created {reflection_count} reflections for {npc_name}")
             await broadcast_ws_message("reflection_event", {"npc_name": npc_name, "status": "completed_reflection", "day": day_being_reflected})
     except Exception as e:
         print(f"ERROR in run_nightly_reflection: {e}")
@@ -337,7 +416,7 @@ async def process_pending_dialogues(current_sim_minutes_total: int):
                     await execute_supabase_query(lambda: supa.table('dialogue_turn').insert(turn_payload).execute())
                     
                     # Insert Memory for this utterance
-                    mem_content = f"{npc_a_name if current_speaker_id == npc_a_id else npc_b_name} said: \"{parsed_utterance}\" during encounter about {trigger_event[:30]}..."
+                    mem_content = f"[Social] {npc_a_name if current_speaker_id == npc_a_id else npc_b_name} said: \"{parsed_utterance}\" during encounter about {trigger_event[:30]}..."
                     utterance_embedding = await get_embedding(mem_content)
                     if utterance_embedding:
                         mem_payload = {'npc_id': current_speaker_id, 'sim_min': current_sim_minutes_total, 'kind': 'obs', 'content': mem_content, 'importance': 2, 'embedding': utterance_embedding}
@@ -389,15 +468,15 @@ async def process_pending_dialogues(current_sim_minutes_total: int):
     for index in sorted(processed_indices, reverse=True):
         pending_dialogue_requests.pop(index)
 
-async def update_npc_actions_and_state(all_npcs_current_data: List[Dict], current_sim_minutes_total: int, actual_current_day: int, new_sim_min_of_day: int, all_areas_data: List[Dict]):
+async def update_npc_actions_and_state(all_npcs_data: List[Dict], current_sim_minutes_total: int, actual_current_day: int, new_sim_min_of_day: int, all_areas_data: List[Dict]):
     # No debug logging here
-    if not all_npcs_current_data: return
+    if not all_npcs_data: return
 
     # Get all active action definitions once for emoji/title lookup
     action_defs_res = await execute_supabase_query(lambda: supa.table('action_def').select('id, title, emoji').execute())
     action_defs_map = {ad['id']: {'title': ad['title'], 'emoji': ad['emoji']} for ad in (action_defs_res.data or [])}
 
-    for npc_snapshot in all_npcs_current_data: # Use the snapshot passed in, avoid re-fetching npc table repeatedly here
+    for npc_snapshot in all_npcs_data: # Use the snapshot passed in, avoid re-fetching npc table repeatedly here
         npc_id = npc_snapshot['id']
         npc_name = npc_snapshot.get('name', 'UnknownNPC')
         current_action_instance_id = npc_snapshot.get('current_action_id')
@@ -468,18 +547,58 @@ async def update_npc_actions_and_state(all_npcs_current_data: List[Dict], curren
                 
                 new_position_payload = None
                 if object_id_for_new_action:
-                    obj_res = await execute_supabase_query(lambda: supa.table('object').select('pos, area_id').eq('id', object_id_for_new_action).maybe_single().execute())
+                    obj_res = await execute_supabase_query(lambda: supa.table('object').select('pos, area_id, name').eq('id', object_id_for_new_action).maybe_single().execute())
                     if obj_res and obj_res.data and obj_res.data.get('pos') and obj_res.data.get('area_id'):
-                        new_position_payload = {'x': obj_res.data['pos'].get('x'), 'y': obj_res.data['pos'].get('y'), 'areaId': obj_res.data['area_id']}
-                        # No logging for position movement
+                        # Added detailed logging for object positions specifically for Lounge objects
+                        obj_data = obj_res.data
+                        obj_name = obj_data.get('name', 'Unknown')
+                        obj_pos = obj_data['pos']
+                        obj_area_id = obj_data['area_id']
+                        
+                        # Get the area name for better logging
+                        area_name = "Unknown"
+                        area_res = await execute_supabase_query(lambda: supa.table('area').select('name').eq('id', obj_area_id).maybe_single().execute())
+                        if area_res and area_res.data:
+                            area_name = area_res.data.get('name', "Unknown")
+                        
+                        new_position_payload = {
+                            'x': obj_pos.get('x'), 
+                            'y': obj_pos.get('y'), 
+                            'areaId': obj_area_id
+                        }
+                
+                # Skip printing current position before update
+                before_area_id = None
+                before_update_res = await execute_supabase_query(lambda: supa.table('npc').select('spawn').eq('id', npc_id).maybe_single().execute())
+                if before_update_res and before_update_res.data and before_update_res.data.get('spawn'):
+                    before_pos = before_update_res.data['spawn']
+                    before_area_id = before_pos.get('areaId')
                 
                 npc_update_payload = {'current_action_id': new_action_instance_id}
                 if new_position_payload: npc_update_payload['spawn'] = new_position_payload
-                await execute_supabase_query(lambda: supa.table('npc').update(npc_update_payload).eq('id', npc_id).execute())
+                update_res = await execute_supabase_query(lambda: supa.table('npc').update(npc_update_payload).eq('id', npc_id).execute())
+                
+                # Skip verbose update verification
+                after_area_id = None
+                after_update_res = await execute_supabase_query(lambda: supa.table('npc').select('spawn').eq('id', npc_id).maybe_single().execute())
+                if after_update_res and after_update_res.data and after_update_res.data.get('spawn'):
+                    after_pos = after_update_res.data['spawn']
+                    after_area_id = after_pos.get('areaId')
+                    
+                    # Check if area changed but don't log verbose warnings
+                    if before_area_id != after_area_id and before_area_id is not None and after_area_id is not None:
+                        await create_area_change_observations(
+                            npc_id, 
+                            npc_name, 
+                            before_area_id, 
+                            after_area_id, 
+                            all_npcs_data, 
+                            current_sim_minutes_total
+                        )
                 
                 await broadcast_ws_message("action_start", {"npc_name": npc_name, "action_title": action_title_log, "emoji": action_emoji_log, "sim_time": new_sim_min_of_day, "day": actual_current_day})
                 current_action_instance_id = new_action_instance_id # Update for current tick
-                is_idle = False # Not idle for this tick
+                is_idle = False
 
             else: # No suitable queued action found in the existing plan for the current time.
                 # No logging for idle NPCs
@@ -493,7 +612,7 @@ async def update_npc_actions_and_state(all_npcs_current_data: List[Dict], curren
         # (The is_truly_idle_for_wander logic from before needs to be re-evaluated based on current_action_instance_id directly)
         if not current_action_instance_id: # Simpler check: if no action is active, NPC is idle for wandering
             if current_position_data and current_position_data.get('areaId') and all_areas_data:
-                if random.random() < 0.25: # Idle wander chance
+                if random.random() < 0.40: # Increased idle wander chance from 0.25 to 0.40
                     current_area_id = current_position_data.get('areaId')
                     # Find the area bounds for the current area
                     current_area_bounds = None
@@ -526,7 +645,7 @@ async def update_npc_actions_and_state(all_npcs_current_data: List[Dict], curren
                         await execute_supabase_query(lambda: supa.table('npc').update({'spawn': new_position}).eq('id', npc_id).execute())
                     else:
                         # If we couldn't find bounds for the current area, try a random area change (less frequently)
-                        if random.random() < 0.1 and len(all_areas_data) > 1:
+                        if random.random() < 0.3 and len(all_areas_data) > 1: # Increased from 0.1 to 0.3
                             # Choose a random different area
                             available_areas = [area for area in all_areas_data if area.get('id') != current_area_id and area.get('bounds')]
                             if available_areas:
@@ -554,6 +673,70 @@ async def update_npc_actions_and_state(all_npcs_current_data: List[Dict], curren
                                     
                                     # No logging for area change
                                     await execute_supabase_query(lambda: supa.table('npc').update({'spawn': new_position}).eq('id', npc_id).execute())
+                                    
+                                    # Create observation memory for area change
+                                    await create_area_change_observations(npc_id, npc_name, current_area_id, target_area.get('id'), all_npcs_data, current_sim_minutes_total)
+
+# Helper function to generate observations for NPC area changes
+async def create_area_change_observations(moving_npc_id, moving_npc_name, from_area_id, to_area_id, all_npcs_data, current_sim_minutes_total):
+    """Create observation memories when NPCs change areas or notice others in their area."""
+    try:
+        # Get area names for better descriptions
+        from_area_name = "an area"
+        to_area_name = "an area"
+        
+        area_res_from = await execute_supabase_query(lambda: supa.table('area').select('name').eq('id', from_area_id).maybe_single().execute())
+        if area_res_from and area_res_from.data:
+            from_area_name = area_res_from.data.get('name', "an area")
+            
+        area_res_to = await execute_supabase_query(lambda: supa.table('area').select('name').eq('id', to_area_id).maybe_single().execute())
+        if area_res_to and area_res_to.data:
+            to_area_name = area_res_to.data.get('name', "an area")
+        
+        # We no longer create self-movement observations
+        # The moving NPC doesn't need to log "I moved from X to Y"
+        
+        # Instead, just find NPCs already in the destination area and create memories for both parties
+        for other_npc in all_npcs_data:
+            other_npc_id = other_npc.get('id')
+            other_npc_name = other_npc.get('name', 'Someone')
+            other_npc_position = other_npc.get('spawn', {})
+            other_npc_area_id = other_npc_position.get('areaId')
+            
+            # Skip if this is the same NPC or if the other NPC isn't in the destination area
+            if other_npc_id == moving_npc_id or other_npc_area_id != to_area_id:
+                continue
+                
+            # Create observation for the moving NPC noticing someone in the new area
+            moving_sees_other_obs = f"[Social] I saw {other_npc_name} in the {to_area_name}."
+            moving_sees_other_embedding = await get_embedding(moving_sees_other_obs)
+            if moving_sees_other_embedding:
+                mem_payload = {
+                    'npc_id': moving_npc_id, 
+                    'sim_min': current_sim_minutes_total, 
+                    'kind': 'obs', 
+                    'content': moving_sees_other_obs, 
+                    'importance': 2, 
+                    'embedding': moving_sees_other_embedding
+                }
+                await execute_supabase_query(lambda: supa.table('memory').insert(mem_payload).execute())
+            
+            # Create observation for the other NPC noticing the moving NPC
+            other_sees_moving_obs = f"[Social] I saw {moving_npc_name} enter the {to_area_name}."
+            other_sees_moving_embedding = await get_embedding(other_sees_moving_obs)
+            if other_sees_moving_embedding:
+                mem_payload = {
+                    'npc_id': other_npc_id, 
+                    'sim_min': current_sim_minutes_total, 
+                    'kind': 'obs', 
+                    'content': other_sees_moving_obs, 
+                    'importance': 2, 
+                    'embedding': other_sees_moving_embedding
+                }
+                await execute_supabase_query(lambda: supa.table('memory').insert(mem_payload).execute())
+    except Exception as e:
+        print(f"Error creating area change observations: {e}")
+        # Don't raise the exception further as this is non-critical functionality
 
 # Modify advance_tick to pass all_areas_data to update_npc_actions_and_state
 async def advance_tick():
@@ -591,14 +774,25 @@ async def advance_tick():
 
         await update_npc_actions_and_state(all_npcs_data, current_sim_minutes_total, actual_current_day, new_sim_min_of_day, all_areas_data_for_tick)
 
+        # MODIFIED: Split reflection and planning into separate conditions
+        # Run reflections at midnight (start of day)
         if new_sim_min_of_day < settings.TICK_SIM_MIN: # True at start of day (00:00 to 00:14 for TICK_SIM_MIN=15)
             if actual_current_day > 1: # Reflection for previous day
                 day_that_just_ended = actual_current_day - 1
                 reflection_context_time = ((day_that_just_ended - 1) * SIM_DAY_MINUTES) + (SIM_DAY_MINUTES - 1) # Effective end of day
+                print(f"Running nightly reflection at start of Day {actual_current_day}")
                 await run_nightly_reflection(day_that_just_ended, reflection_context_time)
-            # Planning for current new day
-            await run_daily_planning(actual_current_day, current_sim_minutes_total) 
         
+        # MODIFIED: Run planning at 5 AM (300 minutes into the day)
+        # Using a range to ensure it triggers even with different tick intervals
+        if 300 <= new_sim_min_of_day < (300 + settings.TICK_SIM_MIN):
+            print(f"Running daily planning at 5 AM of Day {actual_current_day}")
+            await run_daily_planning(actual_current_day, current_sim_minutes_total)
+        
+        # Create plan adherence observations at 12:00 and 00:00
+        if new_sim_min_of_day == 720 or new_sim_min_of_day == 0:  # 12:00 or 00:00
+            await create_plan_adherence_observations(all_npcs_data, current_sim_minutes_total, actual_current_day, new_sim_min_of_day)
+            
         await process_pending_dialogues(current_sim_minutes_total)
         await spawn_random_challenge(current_sim_minutes_total, actual_current_day)
         
@@ -610,6 +804,113 @@ async def advance_tick():
     except Exception as e_adv_tick:
         print(f"CRITICAL ERROR in advance_tick: {e_adv_tick}")
         import traceback; traceback.print_exc()
+
+# Helper function to create plan adherence observations
+async def create_plan_adherence_observations(all_npcs_data, current_sim_minutes_total, current_day, current_min_of_day):
+    """Create observations about whether NPCs are following their plans or have unexpected deviations."""
+    try:
+        # Get the time label for the observation
+        time_label = "noon" if current_min_of_day == 720 else "midnight"
+        
+        for npc in all_npcs_data:
+            npc_id = npc.get('id')
+            npc_name = npc.get('name', 'Unknown')
+            current_action_id = npc.get('current_action_id')
+            
+            # Check current plan for the NPC
+            plan_res = await execute_supabase_query(lambda: supa.table('plan').select('actions').eq('npc_id', npc_id).eq('sim_day', current_day).maybe_single().execute())
+            
+            if not (plan_res and plan_res.data and plan_res.data.get('actions')):
+                # No plan for this day
+                observation_content = f"[Periodic] At {time_label}, I realized I don't have a plan for today."
+                importance = 2
+            else:
+                plan_action_ids = plan_res.data.get('actions', [])
+                
+                # Check for action that should be happening now
+                current_action_title = "nothing scheduled"
+                scheduled_action_found = False
+                
+                if plan_action_ids:
+                    # Look for scheduled actions around this time
+                    time_window_start = max(0, current_min_of_day - 60)  # Look at actions starting up to 1 hour ago
+                    time_window_end = min(1439, current_min_of_day + 60)  # And up to 1 hour in the future
+                    
+                    scheduled_actions_res = await execute_supabase_query(lambda: supa.table('action_instance')
+                        .select('id, def_id(title), start_min, status')
+                        .in_('id', plan_action_ids)
+                        .gte('start_min', time_window_start)
+                        .lte('start_min', time_window_end)
+                        .order('start_min')
+                        .execute())
+                    
+                    if scheduled_actions_res and scheduled_actions_res.data:
+                        scheduled_action = None
+                        for action in scheduled_actions_res.data:
+                            if abs(action.get('start_min', 0) - current_min_of_day) <= 60:  # Within 1 hour
+                                scheduled_action = action
+                                break
+                        
+                        if scheduled_action:
+                            scheduled_action_found = True
+                            current_action_title = scheduled_action.get('def_id', {}).get('title', 'an activity')
+                            scheduled_action_id = scheduled_action.get('id')
+                            scheduled_action_status = scheduled_action.get('status', 'unknown')
+                
+                # Determine if the NPC is following their plan
+                if not scheduled_action_found:
+                    # No action scheduled around this time
+                    if current_action_id:
+                        # But they're doing something
+                        action_res = await execute_supabase_query(lambda: supa.table('action_instance').select('def_id(title)').eq('id', current_action_id).maybe_single().execute())
+                        if action_res and action_res.data:
+                            actual_action_title = action_res.data.get('def_id', {}).get('title', 'something unplanned')
+                            observation_content = f"[Periodic] At {time_label}, I was doing {actual_action_title} which wasn't part of my original plan."
+                            importance = 2
+                        else:
+                            observation_content = f"[Periodic] At {time_label}, I was doing something unplanned."
+                            importance = 2
+                    else:
+                        # And they're not doing anything
+                        observation_content = f"[Periodic] At {time_label}, I had nothing scheduled and was idle as expected."
+                        importance = 1
+                else:
+                    # There is an action scheduled
+                    if current_action_id and current_action_id == scheduled_action_id:
+                        # And they're doing it
+                        observation_content = f"[Periodic] At {time_label}, I was following my plan by doing {current_action_title}."
+                        importance = 1
+                    elif current_action_id:
+                        # But they're doing something else
+                        action_res = await execute_supabase_query(lambda: supa.table('action_instance').select('def_id(title)').eq('id', current_action_id).maybe_single().execute())
+                        if action_res and action_res.data:
+                            actual_action_title = action_res.data.get('def_id', {}).get('title', 'something different')
+                            observation_content = f"[Periodic] At {time_label}, I was supposed to be {current_action_title} according to my plan, but instead I was doing {actual_action_title}."
+                            importance = 3  # Higher importance for deviation
+                        else:
+                            observation_content = f"[Periodic] At {time_label}, I was supposed to be {current_action_title}, but I was doing something else."
+                            importance = 3
+                    else:
+                        # But they're not doing anything
+                        observation_content = f"[Periodic] At {time_label}, I was supposed to be {current_action_title}, but I wasn't doing anything."
+                        importance = 3
+            
+            # Create the observation memory
+            observation_embedding = await get_embedding(observation_content)
+            if observation_embedding:
+                mem_payload = {
+                    'npc_id': npc_id,
+                    'sim_min': current_sim_minutes_total,
+                    'kind': 'obs',
+                    'content': observation_content,
+                    'importance': importance,
+                    'embedding': observation_embedding
+                }
+                await execute_supabase_query(lambda: supa.table('memory').insert(mem_payload).execute())
+    
+    except Exception as e:
+        print(f"Error creating plan adherence observations: {e}")
+        # Don't raise the exception as this is non-critical functionality
 
 # --- Random Challenges Configuration ---
 RANDOM_CHALLENGES = [
@@ -657,6 +958,9 @@ async def spawn_random_challenge(current_sim_minutes_total: int, current_day: in
             print(f"  -> sim_event row inserted, ID: {event_id}. Desc: {challenge['effect_desc']}")
             ws_event_data = {'event_code': challenge['code'], 'description': challenge['effect_desc'], 'tick': current_sim_minutes_total, 'event_id': event_id, 'day': current_day}
             await broadcast_ws_message("sim_event", ws_event_data)
+            
+            # Create observations for NPCs in the affected area (if area-specific) or all NPCs
+            await create_event_observations(challenge, current_sim_minutes_total)
         else:
             # Check if there was a Postgrest error object, otherwise assume no data means failure to get ID
             error_info = "No data returned from insert"
@@ -666,6 +970,60 @@ async def spawn_random_challenge(current_sim_minutes_total: int, current_day: in
                 error_info = f"Insert call did not return data. Status: {getattr(event_response_obj, 'status_code', 'N/A')}"
 
             print(f"  !!!! Failed to insert sim_event for {challenge['code']} or get ID. Details: {error_info}")
+
+# Helper function to create observations for environmental events
+async def create_event_observations(event_data, current_sim_minutes_total):
+    """Create observation memories for NPCs based on environmental events."""
+    try:
+        # Get all NPCs
+        npcs_res = await execute_supabase_query(lambda: supa.table('npc').select('id, name, spawn').execute())
+        if not (npcs_res and npcs_res.data):
+            return
+            
+        # Check if this is an area-specific event
+        target_area_name = event_data.get('metadata', {}).get('target_area_name')
+        target_area_id = None
+        
+        if target_area_name:
+            # Get the area ID from the name
+            area_res = await execute_supabase_query(lambda: supa.table('area').select('id').eq('name', target_area_name).maybe_single().execute())
+            if area_res and area_res.data:
+                target_area_id = area_res.data.get('id')
+        
+        # Build the observation content
+        event_desc = event_data.get('effect_desc', f"Something happened: {event_data.get('label', 'Unknown event')}")
+        
+        # Process each NPC
+        for npc in npcs_res.data:
+            npc_id = npc.get('id')
+            npc_area_id = npc.get('spawn', {}).get('areaId')
+            
+            # Skip NPCs not in the target area if this is an area-specific event
+            if target_area_id and npc_area_id != target_area_id:
+                continue
+                
+            # Create the observation with appropriate wording based on area
+            observation_content = event_desc
+            if target_area_name and npc_area_id == target_area_id:
+                observation_content = f"[Environment] While in the {target_area_name}, I noticed: {event_desc}"
+            else:
+                observation_content = f"[Environment] {event_desc}"
+            
+            # Get embedding and store the memory
+            observation_embedding = await get_embedding(observation_content)
+            if observation_embedding:
+                mem_payload = {
+                    'npc_id': npc_id,
+                    'sim_min': current_sim_minutes_total,
+                    'kind': 'obs',
+                    'content': observation_content,
+                    'importance': 3,  # Events are more important than regular observations
+                    'embedding': observation_embedding
+                }
+                await execute_supabase_query(lambda: supa.table('memory').insert(mem_payload).execute())
+    except Exception as e:
+        print(f"Error creating event observations: {e}")
+        # Don't raise the exception as this is non-critical functionality
 
 # Modify _loop to call spawn_random_challenge
 async def _loop():

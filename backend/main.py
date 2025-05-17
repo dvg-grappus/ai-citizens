@@ -1,4 +1,3 @@
-print("DEBUG_IMPORT: Starting main.py") # DEBUG
 from fastapi import FastAPI, WebSocket, HTTPException
 from fastapi.middleware.cors import CORSMiddleware # Import CORS middleware
 from typing import List, Optional # Added for type hinting if needed, though not in playbook snippet
@@ -6,25 +5,19 @@ import json
 import subprocess
 import os # To get project root
 import logging # For configuring logging
+from pydantic import BaseModel
 
 # Configure logging - set FastAPI and uvicorn loggers to WARNING level to reduce verbosity
 logging.getLogger("fastapi").setLevel(logging.WARNING)
 logging.getLogger("uvicorn").setLevel(logging.WARNING)
 logging.getLogger("uvicorn.access").setLevel(logging.CRITICAL) # Higher level to silence completely
 
-print("DEBUG_IMPORT: main.py - About to import from .models, .services, .scheduler") # DEBUG
-try:
-    from .models import SeedPayload, NPCUIDetailData # Relative import
-    from .services import (
-        insert_npcs, get_state, get_npc_ui_details,
-        supa, execute_supabase_query # Make sure these are available from services
-    )
-    from . import scheduler # For scheduler.start_loop()
-    # from . import scheduler # Keep if scheduler itself is needed, but not for execute_supabase_query
-    print("DEBUG_IMPORT: main.py - Successfully imported from .models, .services, .scheduler") # DEBUG
-except ImportError as e:
-    print(f"DEBUG_IMPORT: main.py - IMPORT ERROR: {e}") # DEBUG
-    raise
+from .models import SeedPayload, NPCUIDetailData # Relative import
+from .services import (
+    insert_npcs, get_state, get_npc_ui_details,
+    supa, execute_supabase_query # Make sure these are available from services
+)
+from . import scheduler # For scheduler.start_loop()
 
 app = FastAPI(title='Artificial Citizens API')
 
@@ -135,13 +128,23 @@ async def reset_sim_day1_end():
         await execute_supabase_query(lambda: supa.table('sim_clock').update({'sim_min': sim_min_to_set}).eq('id', 1).execute())
         await execute_supabase_query(lambda: supa.table('environment').update({'day': day_to_set}).eq('id', 1).execute())
         
-        # Clear future plans and non-observation memories for a clean test of next day's planning/reflection
+        # Clear future plans for a clean test of next day's planning
         await execute_supabase_query(lambda: supa.table('plan').delete().neq('id', '00000000-0000-0000-0000-000000000000').execute())
-        await execute_supabase_query(lambda: supa.table('action_instance').delete().neq('id', '00000000-0000-0000-0000-000000000000').execute())
+        
+        # MODIFIED: Only delete queued and active actions, preserve completed (done) actions
+        # This retains action history while still allowing new planning
+        await execute_supabase_query(lambda: supa.table('action_instance')
+            .delete()
+            .in_('status', ['queued', 'active'])
+            .execute())
+        
+        # Delete plan and reflection memories, but keep observations
         await execute_supabase_query(lambda: supa.table('memory').delete().in_('kind', ['reflect', 'plan']).execute())
-        # Optionally clear dialogue, sim_event, encounter tables too if a full reset is desired
-
+        
+        # Log what we're preserving for clarity
         print(f"Simulation reset: Day set to {day_to_set}, SimMin set to {sim_min_to_set}")
+        print("Note: Completed actions (status='done') are preserved for history")
+        
         # Optional: Force an immediate state broadcast or rely on next tick
         if scheduler._ws_clients: # Accessing scheduler's client list
              payload = {"type": "tick_update", "data": {'new_sim_min': sim_min_to_set, 'new_day': day_to_set}}
@@ -149,7 +152,7 @@ async def reset_sim_day1_end():
                 try: await ws.send_text(json.dumps(payload))
                 except: pass # Ignore send error on reset
 
-        return {"status": "success", "message": f"Simulation time reset to Day {day_to_set}, 23:45. Planning/reflection will trigger soon."}
+        return {"status": "success", "message": f"Simulation time reset to Day {day_to_set}, 23:45. Completed actions are preserved for history."}
     except Exception as e:
         print(f"Error in /reset_simulation_to_end_of_day1: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -193,7 +196,215 @@ async def trigger_seed_script():
         print(f"Error running seed script: {e}")
         raise HTTPException(status_code=500, detail=f"Error running seed script: {str(e)}")
 
+class UserEventRequest(BaseModel):
+    message: str
+    enhance: bool = True
+
+@app.post("/trigger_user_event")
+async def trigger_user_event(request: UserEventRequest):
+    """
+    Create a simulation event from user-provided text.
+    The request should contain a 'message' field with the user's text.
+    Optionally, it can also include an 'enhance' boolean flag to use OpenAI to format the message.
+    """
+    user_message = request.message
+    enhance_with_ai = request.enhance
+    
+    if not user_message:
+        raise HTTPException(status_code=400, detail="Message is required")
+    
+    try:
+        # Get current simulation state for context
+        time_data = await scheduler.get_current_sim_time_and_day()
+        current_day = time_data["day"]
+        current_sim_minutes_total = ((current_day - 1) * scheduler.SIM_DAY_MINUTES) + time_data["sim_min"]
+        
+        # Process the message with OpenAI if requested
+        final_message = user_message
+        if enhance_with_ai:
+            from .llm import call_llm
+            system_prompt = """You are a creative AI assistant helping to enhance user messages into vivid environmental events for a simulation.
+Transform the user's message into a concise, engaging environmental announcement.
+Keep it under 80 characters. Focus on what's happening rather than who caused it.
+Add appropriate emoji if relevant."""
+            user_prompt = f"Transform this message into a vivid environmental event: {user_message}"
+            enhanced_message = call_llm(system_prompt, user_prompt, max_tokens=100)
+            if enhanced_message:
+                final_message = enhanced_message.strip()
+        
+        # Create a custom event code and metadata
+        event_code = "user_event"
+        event_duration = 30  # Default duration in minutes
+        
+        # Insert into sim_event table
+        sim_event_payload = {
+            'type': event_code,
+            'start_min': current_sim_minutes_total,
+            'end_min': current_sim_minutes_total + event_duration,
+            'metadata': {
+                'original_message': user_message,
+                'enhanced': enhance_with_ai
+            }
+        }
+        
+        event_response = await execute_supabase_query(lambda: supa.table('sim_event').insert(sim_event_payload).execute())
+        
+        event_id = None
+        if event_response and event_response.data and len(event_response.data) > 0:
+            event_id = event_response.data[0].get('id')
+            
+            # Broadcast via WebSocket
+            ws_event_data = {
+                'event_code': event_code,
+                'description': final_message,
+                'tick': current_sim_minutes_total,
+                'event_id': event_id,
+                'day': current_day,
+                'user_generated': True
+            }
+            await scheduler.broadcast_ws_message("sim_event", ws_event_data)
+            
+            # Create observations for NPCs
+            # Create a simplified event object similar to the challenges used in scheduler
+            event_data = {
+                'code': event_code,
+                'label': 'User Event',
+                'effect_desc': final_message,
+                'metadata': {}  # No area restriction for user events, all NPCs should observe
+            }
+            
+            # Create observations for all NPCs
+            from .memory_service import get_embedding
+            # Get all NPCs
+            npcs_res = await execute_supabase_query(lambda: supa.table('npc').select('id').execute())
+            if npcs_res and npcs_res.data:
+                for npc in npcs_res.data:
+                    npc_id = npc.get('id')
+                    if npc_id:
+                        # Create observation
+                        observation_content = f"[Environment] I noticed: {final_message}"
+                        observation_embedding = await get_embedding(observation_content)
+                        if observation_embedding:
+                            mem_payload = {
+                                'npc_id': npc_id,
+                                'sim_min': current_sim_minutes_total,
+                                'kind': 'obs',
+                                'content': observation_content,
+                                'importance': 3,  # User events are important
+                                'embedding': observation_embedding
+                            }
+                            await execute_supabase_query(lambda: supa.table('memory').insert(mem_payload).execute())
+            
+            return {
+                "status": "success",
+                "event_id": event_id,
+                "message": final_message,
+                "day": current_day,
+                "sim_min": time_data["sim_min"]
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Failed to create event")
+    except Exception as e:
+        print(f"Error processing user event: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error processing event: {str(e)}")
+
+class SpeedPayload(BaseModel):
+    speed: int  # 1 for normal speed, 2 for double speed, etc.
+    
+@app.post('/set_speed')
+async def set_simulation_speed(payload: SpeedPayload):
+    """Set the simulation speed (1 = normal, 2 = 2x, etc.)"""
+    from .config import get_settings
+    
+    settings = get_settings()
+    
+    # Base tick is 15 minutes of simulation time
+    # Instead of changing the real-time interval, modify how much simulation time passes per tick
+    base_sim_min = 15  # Default simulation minutes per tick
+    
+    if payload.speed == 1:
+        # Normal speed - 15 minutes per tick
+        new_sim_min = 15
+    elif payload.speed == 2:
+        # 2x speed - 30 minutes per tick
+        new_sim_min = 30
+    elif payload.speed == 4:
+        # 4x speed - 60 minutes (1 hour) per tick
+        new_sim_min = 60
+    else:
+        # Default to normal speed
+        new_sim_min = 15
+    
+    # Update the scheduler's tick simulation minutes
+    settings.TICK_SIM_MIN = new_sim_min
+    
+    return {
+        'status': 'speed_updated', 
+        'speed': payload.speed, 
+        'tick_sim_min': new_sim_min,
+        'description': f"Each tick now advances {new_sim_min} simulation minutes"
+    }
+
 # Ensure scheduler loop is started when the app starts
 @app.on_event("startup")
 async def startup_event():
     scheduler.start_loop()
+
+@app.get('/debug_memory_types/{npc_id}')
+async def debug_memory_types(npc_id: str):
+    """Debugging endpoint to check if reflect and plan memories exist in the database."""
+    try:
+        # Check for reflect memories
+        reflect_res = await execute_supabase_query(lambda: supa.table('memory')
+            .select('id, sim_min')
+            .eq('npc_id', npc_id)
+            .eq('kind', 'reflect')
+            .order('sim_min', desc=True)
+            .limit(10)
+            .execute())
+            
+        # Check for plan memories
+        plan_res = await execute_supabase_query(lambda: supa.table('memory')
+            .select('id, sim_min')
+            .eq('npc_id', npc_id)
+            .eq('kind', 'plan')
+            .order('sim_min', desc=True)
+            .limit(10)
+            .execute())
+            
+        # Check for observation memories for comparison
+        obs_res = await execute_supabase_query(lambda: supa.table('memory')
+            .select('id, sim_min')
+            .eq('npc_id', npc_id)
+            .eq('kind', 'obs')
+            .order('sim_min', desc=True)
+            .limit(10)
+            .execute())
+            
+        # Get the NPC's name for reference
+        npc_res = await execute_supabase_query(lambda: supa.table('npc')
+            .select('name')
+            .eq('id', npc_id)
+            .maybe_single()
+            .execute())
+            
+        npc_name = npc_res.data.get('name', 'Unknown') if npc_res and npc_res.data else 'Unknown'
+            
+        return {
+            'npc_id': npc_id,
+            'npc_name': npc_name,
+            'reflect_count': len(reflect_res.data) if reflect_res and reflect_res.data else 0,
+            'plan_count': len(plan_res.data) if plan_res and plan_res.data else 0,
+            'obs_count': len(obs_res.data) if obs_res and obs_res.data else 0,
+            'reflect_memories': reflect_res.data if reflect_res and reflect_res.data else [],
+            'plan_memories': plan_res.data if plan_res and plan_res.data else [],
+            'has_obs': bool(obs_res and obs_res.data),
+            'has_reflect': bool(reflect_res and reflect_res.data),
+            'has_plan': bool(plan_res and plan_res.data)
+        }
+    except Exception as e:
+        print(f"Error in debug_memory_types: {e}")
+        import traceback; traceback.print_exc()
+        return {"error": str(e)}

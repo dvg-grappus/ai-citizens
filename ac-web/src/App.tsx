@@ -3,12 +3,12 @@ import CanvasStage from './components/CanvasStage';
 import ClockOverlay from './components/ClockOverlay';
 import ControlsPanel from './components/ControlsPanel';
 import LogPanel from './components/LogPanel';
+import ChatBox from './components/ChatBox';
 import { useWS } from './hooks/useWS';
 import NPCDetailModal from './components/NPCDetailModal';
 import './App.css'; // Ensure this file is present and cleared or has minimal styles
 
 function App() {
-  console.log("Rendering App component - V3 (Cleaned Structure)");
   useWS(); // Initialize WebSocket connection
 
   const appStyles: React.CSSProperties = {
@@ -17,7 +17,8 @@ function App() {
     height: '100vh',
     width: '100vw',
     overflow: 'hidden', // Prevent scrollbars from main layout
-    backgroundColor: '#121212' // Overall page background
+    backgroundColor: '#121212', // Overall page background
+    paddingBottom: '60px', // Add padding at bottom to accommodate the ChatBox height
   };
 
   const canvasContainerStyles: React.CSSProperties = {
@@ -26,7 +27,7 @@ function App() {
     justifyContent: 'center',
     alignItems: 'center',
     padding: '10px', // Some padding around canvas
-    overflow: 'auto' // In case canvas is larger than container
+    overflow: 'auto', // In case canvas is larger than container
   };
 
   return (
@@ -38,7 +39,8 @@ function App() {
       <ClockOverlay />
       <ControlsPanel />
       <NPCDetailModal />
-      <div style={{ position: 'fixed', bottom: '5px', left: '5px', color: 'cyan', fontSize: '12px', zIndex: 2000, background: 'black', padding: '2px' }}>
+      <ChatBox /> {/* New ChatBox component */}
+      <div style={{ position: 'fixed', bottom: '70px', left: '5px', color: 'cyan', fontSize: '12px', zIndex: 2000, background: 'black', padding: '2px' }}>
         AC UI - Rev.Clean
       </div>
     </div>

@@ -13,7 +13,8 @@ PLAN_SYSTEM_PROMPT_TEMPLATE = "You control NPC {name}. Today is {sim_date}. Your
 # Define available actions for the LLM to choose from
 AVAILABLE_ACTIONS_LIST = [
     "Sleep", "Brush Teeth", "Work", "Eat", "Walk", 
-    "Chat", "Relax", "Read", "Nap", "Explore"
+    "Chat", "Relax", "Read", "Nap", "Explore",
+    "Watch TV", "Relax on Couch", "Have Coffee"
 ]
 AVAILABLE_ACTIONS_STR = ", ".join(AVAILABLE_ACTIONS_LIST)
 
@@ -36,13 +37,19 @@ PLAN_USER_PROMPT_TEMPLATE = (
 # CONTEXT: {{retrieved_memories}}
 # OUTPUT: • … • …
 # Also assign Importance 1—5 to each line.
-REFLECTION_SYSTEM_PROMPT_TEMPLATE = "You are {name}. Summarise the key events and your main thoughts for {sim_date} in 1 to 3 concise bullet points."
+REFLECTION_SYSTEM_PROMPT_TEMPLATE = "You are {name}. Your task is to summarize the key events and your main thoughts for {sim_date} as exactly 1-3 bullet points. Each bullet point MUST start with '•' and end with [Importance: N] where N is 1-5."
 REFLECTION_USER_PROMPT_TEMPLATE = (
     "Consider your core traits: {traits_summary}.\n"
     "Based on the following log of your activities and observations from the day, reflect on what happened.\n"
-    "For each bullet point summary, assign an importance score from 1 (trivial) to 5 (very significant) to it, like this: • Event summary [Importance: X]\n"
+    "\n"
+    "FORMAT YOUR RESPONSE EXACTLY LIKE THIS:\n"
+    "• First reflection point [Importance: X]\n"
+    "• Second reflection point [Importance: Y]\n"
+    "• Third reflection point [Importance: Z]\n"
+    "\n"
+    "IMPORTANT: Each line MUST start with a bullet point (•) and end with [Importance: N] where N is a number from 1-5.\n"
     "CONTEXT (memories from the day - plans, observations, dialogues):\n{retrieved_memories}\n"
-    "TASK: Provide your reflection with importance scores."
+    "TASK: Provide your reflection as 1-3 bullet points with importance scores in the exact format shown above."
 )
 
 # 6.4 Dialogue Generation

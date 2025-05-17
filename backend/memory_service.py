@@ -1,18 +1,11 @@
-print("DEBUG_IMPORT: Starting memory_service.py") # DEBUG
 import asyncio
 import math
 import numpy as np
 from typing import List, Dict, Tuple, Literal, Optional
 
-print("DEBUG_IMPORT: memory_service.py - About to import from .services, .llm, .config") # DEBUG
-try:
-    from .services import supa, execute_supabase_query
-    from .llm import client as openai_client
-    from .config import get_settings
-    print("DEBUG_IMPORT: memory_service.py - Successfully imported all dependencies.") # DEBUG
-except ImportError as e:
-    print(f"DEBUG_IMPORT: memory_service.py - IMPORT ERROR: {e}") # DEBUG
-    raise
+from .services import supa, execute_supabase_query
+from .llm import client as openai_client
+from .config import get_settings
 
 settings = get_settings()
 
@@ -59,7 +52,7 @@ async def retrieve_memories(
 ) -> str:
     weights = QUERY_WEIGHTS.get(query_type)
     if not weights:
-        print(f"Warning: Unknown query type '{query_type}'. Using default planning weights.")
+        # Simplified log message
         weights = QUERY_WEIGHTS["planning"]
     w_recency, w_importance, w_similarity = weights
 
@@ -103,14 +96,15 @@ async def retrieve_memories(
                     if not isinstance(mem_embedding_db, list):
                          raise ValueError("Parsed JSON is not a list")
                 except (json.JSONDecodeError, ValueError) as parse_error:
-                    print(f"Could not parse memory embedding string for mem {mem.get('id', '(unknown ID)')}: {parse_error}. Skipping.")
+                    # Simplified error log
                     mem_embedding_db = None
             
             if isinstance(mem_embedding_db, list) and query_embedding:
                  similarity_score = cosine_similarity(query_embedding, mem_embedding_db)
 
         except Exception as e_sim:
-            print(f"Error calculating similarity for memory {mem.get('id', '(unknown ID)')}: {e_sim}")
+            # Simplified error log
+            pass
 
         total_score = (
             w_recency * recency_score +

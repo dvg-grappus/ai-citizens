@@ -15,9 +15,10 @@ const LogPanel: React.FC = () => {
         fontSize: '11px',
         overflowY: 'auto', // Changed to auto for scrollbar only when needed
         padding: '10px',
+        paddingBottom: '70px', // Add padding to prevent overlap with the ChatBox
         boxSizing: 'border-box',
         display: 'flex',
-        flexDirection: 'column-reverse', // Keeps newest at bottom visually
+        flexDirection: 'column-reverse', // Use column-reverse to show newest at bottom
     };
 
     const messageStyles: React.CSSProperties = {
@@ -27,17 +28,17 @@ const LogPanel: React.FC = () => {
         borderBottom: '1px solid #2a2a2a' // Separator for messages
     };
 
-    // Auto-scroll to the bottom (which is the top when using column-reverse)
+    // Auto-scroll to keep newest messages visible
     useEffect(() => {
         if (logContainerRef.current) {
-            logContainerRef.current.scrollTop = 0; 
+            logContainerRef.current.scrollTop = 0; // In column-reverse, 0 is the end (newest)
         }
     }, [logMessages]);
 
     return (
         <div style={panelStyles} ref={logContainerRef}>
-            {/* Add a placeholder if log is empty, or just render empty */}
-            {[...logMessages].reverse().map((msg, index) => ( 
+            {/* No need to reverse the array - the store already has newest first */}
+            {logMessages.map((msg, index) => ( 
                 <div key={index} style={messageStyles}>
                     {msg}
                 </div>

@@ -1,13 +1,10 @@
-print("DEBUG_IMPORT: Starting services.py") # DEBUG
 import asyncio
 from supabase import create_client, Client
 from typing import Optional, List, Dict # Ensure all needed types are imported
 from .config import get_settings # Use relative import
 import random
-from .models import NPCUIDetailData, ActionInfo # Import new models
+from .models import NPCUIDetailData, ActionInfo, ReflectionInfo, MemoryEvent # Import new models
 from postgrest.exceptions import APIError # Add APIError
-
-print("DEBUG_IMPORT: services.py - Basic imports complete. Defining supa and helpers...") # DEBUG
 
 settings = get_settings()
 
@@ -25,16 +22,12 @@ async def execute_supabase_query(query_executable_lambda):
             return response
         except APIError as e:
             if str(e.code) == "204": 
-                # print(f"DEBUG: services.execute_supabase_query - Caught 204 No Content. Returning EmptyResponse.")
                 class EmptyResponse:
                     def __init__(self):
                         self.data = None; self.error = None; self.status_code = 204; self.count = None
                 return EmptyResponse()
             else:
                 print(f"Supabase APIError in services.execute_supabase_query (Code: {e.code}): {e.message}")
-                # Consider if all APIErrors should return a structured error response object
-                # instead of re-raising, to prevent crashes in calling code if not handled there.
-                # For now, re-raising non-204 APIErrors.
                 raise 
         except Exception as e_generic:
             print(f"Supabase Generic Exception in services.execute_supabase_query: {e_generic}")
@@ -57,17 +50,77 @@ def insert_npcs(npcs_data: list):
 async def get_npc_ui_details(npc_id_to_fetch: str, current_day_from_env: int) -> Optional[NPCUIDetailData]:
     print(f"Fetching UI details for NPC: {npc_id_to_fetch}, Current Day: {current_day_from_env}")
     try:
+        # First check if the NPC exists
         npc_info_res = await execute_supabase_query(lambda: supa.table('npc').select('id, name').eq('id', npc_id_to_fetch).maybe_single().execute())
         if not (npc_info_res and npc_info_res.data):
-            print(f"  NPC {npc_id_to_fetch} not found for details.")
+            print(f"  NPC {npc_id_to_fetch} not found in npc table. This could be due to a database reseed or NPC deletion.")
             return None
         npc_name = npc_info_res.data['name']
 
+        # Cache of area IDs to names for quick lookup
+        area_cache = {}
+        areas_res = await execute_supabase_query(lambda: supa.table('area').select('id, name').execute())
+        if areas_res and areas_res.data:
+            for area in areas_res.data:
+                area_cache[area['id']] = area['name']
+
+        # Cache of object IDs to area names
+        object_to_area_cache = {}
+        objects_res = await execute_supabase_query(lambda: supa.table('object').select('id, area_id').execute())
+        if objects_res and objects_res.data:
+            for obj in objects_res.data:
+                if obj['area_id'] in area_cache:
+                    object_to_area_cache[obj['id']] = area_cache[obj['area_id']]
+
+        # Get the last completed action (for backward compatibility)
         last_completed_action_info = None
-        last_done_res = await execute_supabase_query(lambda: supa.table('action_instance').select('start_min, def_id(title)').eq('npc_id', npc_id_to_fetch).eq('status', 'done').order('start_min', desc=True).limit(1).maybe_single().execute())
-        if last_done_res and last_done_res.data:
-            ad = last_done_res.data; sm = ad.get('start_min'); t = f"{sm // 60:02d}:{sm % 60:02d}" if sm is not None else ""
-            last_completed_action_info = ActionInfo(time=t, title=ad.get('def_id',{}).get('title','?'), status='done')
+        
+        # Get up to 5 completed actions
+        completed_actions_list: List[ActionInfo] = []
+        # Use DISTINCT ON to prevent duplicate actions with the same start_min and title
+        completed_actions_res = await execute_supabase_query(lambda: supa.table('action_instance')
+            .select('id, start_min, def_id(id, title), object_id, status')
+            .eq('npc_id', npc_id_to_fetch)
+            .eq('status', 'done')
+            .order('start_min', desc=True)
+            .limit(5)
+            .execute())
+            
+        if completed_actions_res and completed_actions_res.data:
+            # Process the results to filter out duplicates with the same time and title
+            unique_actions = {}
+            for ad in completed_actions_res.data:
+                sm = ad.get('start_min')
+                title = ad.get('def_id', {}).get('title', '?')
+                time_key = f"{sm // 60:02d}:{sm % 60:02d}" if sm is not None else ""
+                
+                # Create a unique key using time and title to deduplicate
+                action_key = f"{time_key}_{title}"
+                
+                # Skip if we already have this action
+                if action_key in unique_actions:
+                    continue
+                    
+                # Add to unique actions dictionary
+                unique_actions[action_key] = ad
+            
+            # Now process the unique actions
+            for idx, ad in enumerate(unique_actions.values()):
+                sm = ad.get('start_min')
+                t = f"{sm // 60:02d}:{sm % 60:02d}" if sm is not None else ""
+                area_name = None
+                if ad.get('object_id') and ad['object_id'] in object_to_area_cache:
+                    area_name = object_to_area_cache[ad['object_id']]
+                action_info = ActionInfo(
+                    time=t, 
+                    title=ad.get('def_id',{}).get('title','?'), 
+                    status='done',
+                    area_name=area_name
+                )
+                completed_actions_list.append(action_info)
+                # Set the first one as the last_completed_action for backward compatibility
+                if idx == 0:
+                    last_completed_action_info = action_info
 
         queued_actions_list: List[ActionInfo] = []
         plan_res = await execute_supabase_query(lambda: supa.table('plan').select('actions').eq('npc_id', npc_id_to_fetch).eq('sim_day', current_day_from_env).maybe_single().execute())
@@ -91,23 +144,150 @@ async def get_npc_ui_details(npc_id_to_fetch: str, current_day_from_env: int) ->
                         time_str = f"{sm // 60:02d}:{sm % 60:02d}" if sm is not None else "??:??"
                         status_str = act_detail.get('status', 'unknown')
                         
+                        # Get area name if object_id is available
+                        area_name = None
+                        if act_detail.get('object_id') and act_detail['object_id'] in object_to_area_cache:
+                            area_name = object_to_area_cache[act_detail['object_id']]
+                        
                         # Populate Current Day's Plan Summary
-                        current_plan_summary_list.append(f"{time_str} - {title} ({status_str})")
+                        location_str = f" in {area_name}" if area_name else ""
+                        current_plan_summary_list.append(f"{time_str} - {title}{location_str} ({status_str})")
                         
                         # Populate Queued Actions (up to 10)
                         if status_str == 'queued' and len(queued_actions_list) < 10:
-                            queued_actions_list.append(ActionInfo(time=time_str, title=title, status=status_str))
+                            queued_actions_list.append(ActionInfo(
+                                time=time_str, 
+                                title=title, 
+                                status=status_str,
+                                area_name=area_name
+                            ))
         
+        # Get latest reflection for backward compatibility
         latest_reflection_str = None
-        reflection_res = await execute_supabase_query(lambda: supa.table('memory').select('content').eq('npc_id', npc_id_to_fetch).eq('kind', 'reflect').order('sim_min', desc=True).limit(1).maybe_single().execute())
-        if reflection_res and reflection_res.data: latest_reflection_str = reflection_res.data.get('content')
+        
+        # Get up to 5 reflections
+        reflections_list: List[ReflectionInfo] = []
+        reflections_res = await execute_supabase_query(lambda: supa.table('memory').select('content, sim_min').eq('npc_id', npc_id_to_fetch).eq('kind', 'reflect').order('sim_min', desc=True).limit(5).execute())
+        if reflections_res and reflections_res.data:
+            for idx, reflection in enumerate(reflections_res.data):
+                content = reflection.get('content', '')
+                sim_min = reflection.get('sim_min')
+                time_str = f"Day {sim_min // 1440 + 1}, {(sim_min % 1440) // 60:02d}:{(sim_min % 1440) % 60:02d}" if sim_min is not None else ""
+                
+                reflections_list.append(ReflectionInfo(
+                    content=content,
+                    time=time_str
+                ))
+                
+                # Set the first one as the latest_reflection for backward compatibility
+                if idx == 0:
+                    latest_reflection_str = content
+
+        # Get memory stream events (most recent 50)
+        memory_stream_list: List[MemoryEvent] = []
+        
+        # Keep the dedicated debug query but don't log results
+        reflect_plan_debug_res = await execute_supabase_query(lambda: supa.table('memory')
+            .select('id, kind, sim_min')
+            .eq('npc_id', npc_id_to_fetch)
+            .in_('kind', ['reflect', 'plan'])
+            .order('sim_min', desc=True)
+            .limit(10)
+            .execute())
+        
+        # Get a combined total of 50 memories including at least 5 reflect and 5 plan (if they exist)
+        # This ensures we get a good mix of memory types
+        memory_stream_res = await execute_supabase_query(lambda: supa.table('memory')
+            .select('content, sim_min, kind')
+            .eq('npc_id', npc_id_to_fetch)
+            .order('sim_min', desc=True)
+            .limit(50)
+            .execute())
+        
+        # Get the top reflect and plan memories separately to ensure they're included
+        reflect_memories_res = await execute_supabase_query(lambda: supa.table('memory')
+            .select('content, sim_min, kind')
+            .eq('npc_id', npc_id_to_fetch)
+            .eq('kind', 'reflect')
+            .order('sim_min', desc=True)
+            .limit(5)
+            .execute())
+            
+        plan_memories_res = await execute_supabase_query(lambda: supa.table('memory')
+            .select('content, sim_min, kind')
+            .eq('npc_id', npc_id_to_fetch)
+            .eq('kind', 'plan')
+            .order('sim_min', desc=True)
+            .limit(5)
+            .execute())
+        
+        # Skip memory type counting and verbose logging
+        if memory_stream_res and memory_stream_res.data:
+            for memory in memory_stream_res.data:
+                content = memory.get('content', '')
+                sim_min = memory.get('sim_min')
+                mem_type = memory.get('kind', 'unknown')
+                time_str = f"Day {sim_min // 1440 + 1}, {(sim_min % 1440) // 60:02d}:{(sim_min % 1440) % 60:02d}" if sim_min is not None else ""
+                
+                memory_stream_list.append(MemoryEvent(
+                    content=content,
+                    time=time_str,
+                    type=mem_type
+                ))
+        
+        # Add the reflect and plan memories
+        if reflect_memories_res and reflect_memories_res.data:
+            for memory in reflect_memories_res.data:
+                content = memory.get('content', '')
+                sim_min = memory.get('sim_min')
+                mem_type = memory.get('kind', 'unknown')
+                time_str = f"Day {sim_min // 1440 + 1}, {(sim_min % 1440) // 60:02d}:{(sim_min % 1440) % 60:02d}" if sim_min is not None else ""
+                
+                # Check if this memory is already in the list
+                already_included = False
+                for existing_mem in memory_stream_list:
+                    if existing_mem.content == content and existing_mem.time == time_str:
+                        already_included = True
+                        break
+                
+                if not already_included:
+                    memory_stream_list.append(MemoryEvent(
+                        content=content,
+                        time=time_str,
+                        type=mem_type
+                    ))
+        
+        # Add the plan memories
+        if plan_memories_res and plan_memories_res.data:
+            for memory in plan_memories_res.data:
+                content = memory.get('content', '')
+                sim_min = memory.get('sim_min')
+                mem_type = memory.get('kind', 'unknown')
+                time_str = f"Day {sim_min // 1440 + 1}, {(sim_min % 1440) // 60:02d}:{(sim_min % 1440) % 60:02d}" if sim_min is not None else ""
+                
+                # Check if this memory is already in the list
+                already_included = False
+                for existing_mem in memory_stream_list:
+                    if existing_mem.content == content and existing_mem.time == time_str:
+                        already_included = True
+                        break
+                
+                if not already_included:
+                    memory_stream_list.append(MemoryEvent(
+                        content=content,
+                        time=time_str,
+                        type=mem_type
+                    ))
 
         return NPCUIDetailData(
             npc_id=npc_id_to_fetch, npc_name=npc_name,
             last_completed_action=last_completed_action_info,
+            completed_actions=completed_actions_list,
             queued_actions=queued_actions_list,
             latest_reflection=latest_reflection_str,
-            current_plan_summary=current_plan_summary_list
+            reflections=reflections_list,
+            current_plan_summary=current_plan_summary_list,
+            memory_stream=memory_stream_list
         )
     except Exception as e:
         print(f"Error in get_npc_ui_details for {npc_id_to_fetch}: {e}")
@@ -143,5 +323,5 @@ async def get_state():
             "environment": (environment_res.data if environment_res else {"day": 1})
         }
     except Exception as e:
-        print(f"Error in get_state V4: {e}"); import traceback; traceback.print_exc()
+        print(f"Error in get_state: {e}"); import traceback; traceback.print_exc()
         return {"npcs": [], "areas": [], "sim_clock": {"sim_min": 0}, "environment": {"day": 1}}

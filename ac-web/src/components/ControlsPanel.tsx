@@ -31,21 +31,48 @@ const ControlsPanel: React.FC = () => {
     };
 
     const handleSetSpeed = async (speed: number) => {
+        if (!apiUrl) { console.error('API URL not defined for speed change'); return; }
         console.log(`Setting simulation speed to x${speed}`);
-        // This would need backend support for speed changes
+        
+        try {
+            const response = await fetch(`${apiUrl}/set_speed`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ speed }),
+            });
+            
+            if (!response.ok) {
+                throw new Error(`Failed to set speed: ${response.status}`);
+            }
+            
+            const result = await response.json();
+            const simMinutes = result.tick_sim_min || (speed * 15);
+            pushLog(`🚀 Speed x${speed} - Now advancing ${simMinutes} sim-minutes per tick`);
+            console.log(`Speed change response:`, result);
+        } catch (error) {
+            console.error('Error changing speed:', error);
+            pushLog(`❌ Error changing speed: ${error}`);
+        }
     };
 
     const handleResetDay1End = async () => {
         if (!apiUrl) { console.error('API URL not defined for day reset'); return; }
         console.log("Resetting to end of Day 1...");
+        pushLog("⏰ Resetting to end of Day 1 - completed actions will be preserved");
         try {
             const response = await fetch(`${apiUrl}/reset_simulation_to_end_of_day1`, { method: 'POST' });
             if (!response.ok) {
                 throw new Error(`Failed to reset: ${response.status}`);
             }
-            console.log("Reset to end of Day 1 successful.");
+            const result = await response.json();
+            pushLog(`✅ ${result.message || "Reset to end of Day 1 successful."}`);
+            console.log("Reset to end of Day 1 successful:", result);
         } catch (error) {
-            console.error('Error in day reset:', error);
+            const errorMsg = `Error in day reset: ${error}`;
+            console.error(errorMsg);
+            pushLog(`❌ ${errorMsg}`);
         }
     };
 
@@ -109,7 +136,10 @@ const ControlsPanel: React.FC = () => {
             const { error: objectError } = await supabase.from('object').insert([
                 { area_id: bedroomId, name: 'Bed', state: 'free', pos: { x: 50, y: 50 } },
                 { area_id: bathroomId, name: 'Toothbrush', state: 'free', pos: { x: 30, y: 350 } },
-                { area_id: officeId, name: 'PC', state: 'free', pos: { x: 450, y: 50 } }
+                { area_id: officeId, name: 'PC', state: 'free', pos: { x: 450, y: 50 } },
+                { area_id: loungeId, name: 'Couch', state: 'free', pos: { x: 310, y: 310 } },
+                { area_id: loungeId, name: 'TV', state: 'free', pos: { x: 350, y: 350 } },
+                { area_id: loungeId, name: 'Coffee Table', state: 'free', pos: { x: 300, y: 350 } }
             ]);
             
             if (objectError) throw new Error(`Error inserting objects: ${objectError.message}`);
@@ -130,7 +160,10 @@ const ControlsPanel: React.FC = () => {
                 { title: 'Evacuate', emoji: '🏃', base_minutes: 15 },
                 { title: 'Get Pizza', emoji: '🍕', base_minutes: 20 },
                 { title: 'Complain about Wi-Fi', emoji: '😠', base_minutes: 10 },
-                { title: 'Idle', emoji: '🧍', base_minutes: 15 }
+                { title: 'Idle', emoji: '��', base_minutes: 15 },
+                { title: 'Watch TV', emoji: '📺', base_minutes: 60 },
+                { title: 'Relax on Couch', emoji: '🛋️', base_minutes: 90 },
+                { title: 'Have Coffee', emoji: '☕', base_minutes: 30 }
             ];
             
             const { error: actionDefError } = await supabase.from('action_def').insert(actionDefPayloads);
@@ -243,7 +276,14 @@ const ControlsPanel: React.FC = () => {
             <button style={buttonStyles} onClick={() => handleSetSpeed(2)}>
                 x2 Speed
             </button>
-            <button style={buttonStyles} onClick={handleResetDay1End}>
+            <button style={buttonStyles} onClick={() => handleSetSpeed(4)}>
+                x4 Speed
+            </button>
+            <button 
+                style={buttonStyles} 
+                onClick={handleResetDay1End}
+                title="Reset to end of Day 1. Preserves completed action history."
+            >
                 Test Day Rollover
             </button>
             <button style={{...buttonStyles, backgroundColor: '#c0392b', color: 'white'}} onClick={handleDirectReseedDatabase}>

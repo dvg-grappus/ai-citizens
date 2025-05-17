@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { Stage, Layer, Rect, Text as KonvaText } from 'react-konva';
 import { useSimStore } from '../store/simStore';
 import type { DisplayNPC, DisplayArea } from '../store/simStore';
@@ -35,22 +35,52 @@ interface DefinedArea {
 
 const CanvasStage: React.FC = () => {
     const npcs = useSimStore((state) => state.npcs);
-    // const areasFromStore = useSimStore((state) => state.areas); // Not used if defining areas locally
+    const areasFromStore = useSimStore((state) => state.areas); // Now using areas from store
+    const [areasWithBounds, setAreasWithBounds] = useState<DefinedArea[]>([]);
 
-    const definedAreas: DefinedArea[] = [
-        { id: 'area1', name: 'Bedroom',  bounds: { x: 0, y: 0, w: AREA_WIDTH, h: AREA_HEIGHT } },
-        { id: 'area2', name: 'Office',   bounds: { x: AREA_WIDTH, y: 0, w: AREA_WIDTH, h: AREA_HEIGHT } },
-        { id: 'area3', name: 'Bathroom', bounds: { x: 0, y: AREA_HEIGHT, w: AREA_WIDTH, h: AREA_HEIGHT } },
-        { id: 'area4', name: 'Lounge',   bounds: { x: AREA_WIDTH, y: AREA_HEIGHT, w: AREA_WIDTH, h: AREA_HEIGHT } },
-    ];
+    // Define the proper area locations based on names
+    useEffect(() => {
+        if (areasFromStore && areasFromStore.length > 0) {
+            // Create area definitions that map ACTUAL area IDs from database to their visual positions
+            const newAreasWithBounds: DefinedArea[] = areasFromStore.map(area => {
+                let bounds;
+                
+                // Map by name instead of assuming IDs
+                switch (area.name) {
+                    case 'Bedroom':
+                        bounds = { x: 0, y: 0, w: AREA_WIDTH, h: AREA_HEIGHT };
+                        break;
+                    case 'Office':
+                        bounds = { x: AREA_WIDTH, y: 0, w: AREA_WIDTH, h: AREA_HEIGHT };
+                        break;
+                    case 'Bathroom':
+                        bounds = { x: 0, y: AREA_HEIGHT, w: AREA_WIDTH, h: AREA_HEIGHT };
+                        break;
+                    case 'Lounge':
+                        bounds = { x: AREA_WIDTH, y: AREA_HEIGHT, w: AREA_WIDTH, h: AREA_HEIGHT };
+                        break;
+                    default:
+                        bounds = { x: 0, y: 0, w: AREA_WIDTH, h: AREA_HEIGHT };
+                }
+                
+                return {
+                    id: area.id, // Use the ACTUAL ID from database
+                    name: area.name,
+                    bounds
+                };
+            });
+            
+            setAreasWithBounds(newAreasWithBounds);
+        }
+    }, [areasFromStore]);
 
     return (
         <Stage width={STAGE_WIDTH} height={STAGE_HEIGHT} style={{ backgroundColor: '#202020' }}> 
             <Layer> 
-                {definedAreas.map((area) => (
+                {areasWithBounds.map((area) => (
                     <React.Fragment key={`area_group_${area.id}`}>
                         <Rect
-                            x={area.bounds.x} // Now type-safe
+                            x={area.bounds.x}
                             y={area.bounds.y}
                             width={area.bounds.w}
                             height={area.bounds.h}
@@ -59,7 +89,7 @@ const CanvasStage: React.FC = () => {
                             fill="#282828"
                         />
                         <KonvaText 
-                            text={area.name}
+                            text={`${area.name} (${area.id.substring(0, 4)}...)`}
                             x={area.bounds.x + 10}
                             y={area.bounds.y + 10}
                             fontSize={12}
