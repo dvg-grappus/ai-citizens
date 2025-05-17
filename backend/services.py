@@ -80,6 +80,60 @@ async def execute_supabase_query(query_executable_lambda):
 
 # --- End Semaphore and DB Execution Helper ---
 
+# --- Core Generic Service Functions ---
+async def get_npc_by_id(npc_id: str) -> Optional[Dict]:
+    """Fetches an NPC by its ID."""
+    try:
+        response = await execute_supabase_query(lambda: supa.table('npc').select('*').eq('id', npc_id).maybe_single().execute())
+        return response.data if response else None
+    except Exception as e:
+        print(f"Error in get_npc_by_id for {npc_id}: {e}")
+        return None
+
+async def save_npc(npc_data: Dict) -> Optional[Dict]:
+    """Saves (updates) NPC data. Assumes npc_data includes 'id' and fields to update."""
+    if 'id' not in npc_data:
+        print("Error in save_npc: 'id' not found in npc_data")
+        return None
+    
+    npc_id = npc_data.pop('id') # Remove id from data, use it in eq
+    try:
+        response = await execute_supabase_query(lambda: supa.table('npc').update(npc_data).eq('id', npc_id).execute())
+        # Update typically returns a list of the updated records
+        return response.data[0] if response and response.data else None 
+    except Exception as e:
+        print(f"Error in save_npc for {npc_id}: {e}")
+        return None
+
+async def get_object_by_id(object_id: str) -> Optional[Dict]:
+    """Fetches an object by its ID."""
+    try:
+        response = await execute_supabase_query(lambda: supa.table('object').select('*').eq('id', object_id).maybe_single().execute())
+        return response.data if response else None
+    except Exception as e:
+        print(f"Error in get_object_by_id for {object_id}: {e}")
+        return None
+
+async def get_area_details(area_id: str) -> Optional[Dict]:
+    """Fetches area details by area ID."""
+    try:
+        response = await execute_supabase_query(lambda: supa.table('area').select('*').eq('id', area_id).maybe_single().execute())
+        return response.data if response else None
+    except Exception as e:
+        print(f"Error in get_area_details for {area_id}: {e}")
+        return None
+
+async def update_npc_current_action(npc_id: str, action_id: Optional[str]) -> Optional[Dict]:
+    """Updates the current_action_id for a given NPC."""
+    try:
+        response = await execute_supabase_query(lambda: supa.table('npc').update({'current_action_id': action_id}).eq('id', npc_id).execute())
+        return response.data[0] if response and response.data else None
+    except Exception as e:
+        print(f"Error in update_npc_current_action for {npc_id}: {e}")
+        return None
+
+# --- End Core Generic Service Functions ---
+
 print("DEBUG_IMPORT: services.py - supa, semaphore, execute_supabase_query DEFINED.") # DEBUG
 
 def insert_npcs(npcs_data: list):

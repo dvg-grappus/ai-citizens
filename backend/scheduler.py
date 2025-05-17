@@ -15,12 +15,11 @@ from .prompts import (
     REFLECTION_SYSTEM_PROMPT_TEMPLATE, REFLECTION_USER_PROMPT_TEMPLATE, 
     DIALOGUE_SYSTEM_PROMPT_TEMPLATE, DIALOGUE_USER_PROMPT_TEMPLATE, format_traits
 )
-from .memory_service import retrieve_memories, get_embedding 
-from .services import supa, execute_supabase_query
+from .memory_service import retrieve_memories, get_embedding, save_memory_batch, get_recent_memories_for_npc
+from .services import supa, execute_supabase_query, get_npc_by_id, save_npc, get_object_by_id, get_area_details, update_npc_current_action
 from .websocket_utils import register_ws, unregister_ws, broadcast_ws_message
 from .planning_and_reflection import run_daily_planning, run_nightly_reflection
-from .dialogue_service import process_pending_dialogues as process_dialogues_ext
-from .dialogue_service import add_pending_dialogue_request as add_dialogue_request_ext
+from .dialogue_service import process_pending_dialogues as process_dialogues_ext, add_pending_dialogue_request as add_dialogue_request_ext
 
 settings = get_settings()
 # _ws_clients: List[Any] = [] # Renamed _ws to _ws_clients for clarity # REMOVE THIS LINE
@@ -31,6 +30,11 @@ db_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DB_OPS)
 
 NPC_ACTION_LOG_INTERVAL = 10 # Log NPC actions every this many ticks
 RANDOM_CHALLENGE_PROBABILITY = 0.05
+
+# Global constants
+MOVEMENT_AREA_MARGIN = 20  # NPCs should stay 20 units away from area boundaries
+EXPECTED_AREA_WIDTH = 400 # Standard assumed width for an area's local coordinate space
+EXPECTED_AREA_HEIGHT = 300 # Standard assumed height for an area's local coordinate space
 
 async def get_current_sim_time_and_day() -> Dict[str, int]:
     """Fetches current sim_min from sim_clock and day from environment."""
@@ -72,52 +76,39 @@ async def update_npc_actions_and_state(all_npcs_data: List[Dict], current_sim_mi
     # No debug logging here
     if not all_npcs_data: return
 
-    # Get all active action definitions once for emoji/title lookup
     action_defs_res = await execute_supabase_query(lambda: supa.table('action_def').select('id, title, emoji').execute())
     action_defs_map = {ad['id']: {'title': ad['title'], 'emoji': ad['emoji']} for ad in (action_defs_res.data or [])}
 
-    for npc_snapshot in all_npcs_data: # Use the snapshot passed in, avoid re-fetching npc table repeatedly here
+    for npc_snapshot in all_npcs_data:
         npc_id = npc_snapshot['id']
         npc_name = npc_snapshot.get('name', 'UnknownNPC')
-        current_action_instance_id = npc_snapshot.get('current_action_id')
-        current_position_data = npc_snapshot.get('spawn') # spawn field holds current position
 
+        current_action_instance_id = npc_snapshot.get('current_action_id')
+        current_position_data = npc_snapshot.get('spawn', {}) # Ensure spawn is a dict
         action_just_completed = False
+        new_action_started_this_tick = False # Flag to track if a new action (not wander) started
 
         # 1. Check completion of current action
         if current_action_instance_id:
             action_instance_res = await execute_supabase_query(lambda: supa.table('action_instance').select('start_min, duration_min, status, def_id, object_id').eq('id', current_action_instance_id).maybe_single().execute())
             if action_instance_res and action_instance_res.data:
                 act_inst = action_instance_res.data
-                # action_start_min_of_day is from 0-1439. current_sim_minutes_total is absolute.
-                # If an action spans midnight, this simple check might be insufficient.
-                # For now, assume actions are within a single day for start_min comparison.
-                # A robust way: store absolute start time in action_instance, or calculate it carefully.
-                # For this iteration: let's assume start_min in DB is relative to the day the action was planned for.
-                # We need the day the action instance BELONGS to if it can span days.
-                # Simpler: assume current_sim_minutes_total compared to start_min + duration if start_min was absolute.
-                # If start_min is relative to its planned day, and action is for *today* (actual_current_day):
                 action_planned_day_start_abs = (actual_current_day - 1) * SIM_DAY_MINUTES
                 action_instance_start_abs = action_planned_day_start_abs + act_inst['start_min']
 
                 if act_inst['status'] == 'active' and (current_sim_minutes_total >= action_instance_start_abs + act_inst['duration_min']):
-                    # No logging for completed actions
                     await execute_supabase_query(lambda: supa.table('action_instance').update({'status': 'done'}).eq('id', current_action_instance_id).execute())
                     await execute_supabase_query(lambda: supa.table('npc').update({'current_action_id': None}).eq('id', npc_id).execute())
                     current_action_instance_id = None 
                     action_just_completed = True
-            else:
-                # Critical warning only
-                print(f"WARNING: NPC {npc_name} had current_action_id {current_action_instance_id} but instance not found in DB.")
+            else: # Action instance not found, clear it from NPC
                 await execute_supabase_query(lambda: supa.table('npc').update({'current_action_id': None}).eq('id', npc_id).execute())
                 current_action_instance_id = None
-                action_just_completed = True # Treat as if an action just finished
+                action_just_completed = True
 
         # 2. If no current action OR an action just completed, find and start next scheduled action for *today*
         if not current_action_instance_id:
-            # No logging for action seeking
             plan_response_obj = await execute_supabase_query(lambda: supa.table('plan').select('actions').eq('npc_id', npc_id).eq('sim_day', actual_current_day).maybe_single().execute())
-            
             next_action_to_start = None
             if plan_response_obj and plan_response_obj.data and plan_response_obj.data.get('actions'):
                 action_instance_ids_in_plan = plan_response_obj.data['actions']
@@ -127,7 +118,6 @@ async def update_npc_actions_and_state(all_npcs_data: List[Dict], current_sim_mi
                         .in_('id', action_instance_ids_in_plan)
                         .order('start_min')
                         .execute())
-                    
                     if action_instances_res and action_instances_res.data:
                         for inst in action_instances_res.data:
                             if inst['status'] == 'queued' and new_sim_min_of_day >= inst['start_min']:
@@ -142,140 +132,103 @@ async def update_npc_actions_and_state(all_npcs_data: List[Dict], current_sim_mi
                 action_title_log = action_details['title']
                 action_emoji_log = action_details['emoji']
 
-                # No logging for action start
                 await execute_supabase_query(lambda: supa.table('action_instance').update({'status': 'active'}).eq('id', new_action_instance_id).execute())
                 
-                new_position_payload = None
-                if object_id_for_new_action:
-                    obj_res = await execute_supabase_query(lambda: supa.table('object').select('pos, area_id, name').eq('id', object_id_for_new_action).maybe_single().execute())
-                    if obj_res and obj_res.data and obj_res.data.get('pos') and obj_res.data.get('area_id'):
-                        # Added detailed logging for object positions specifically for Lounge objects
-                        obj_data = obj_res.data
-                        obj_name = obj_data.get('name', 'Unknown')
-                        obj_pos = obj_data['pos']
-                        obj_area_id = obj_data['area_id']
-                        
-                        # Get the area name for better logging
-                        area_name = "Unknown"
-                        area_res = await execute_supabase_query(lambda: supa.table('area').select('name').eq('id', obj_area_id).maybe_single().execute())
-                        if area_res and area_res.data:
-                            area_name = area_res.data.get('name', "Unknown")
-                        
-                        new_position_payload = {
-                            'x': obj_pos.get('x'), 
-                            'y': obj_pos.get('y'), 
-                            'areaId': obj_area_id
-                        }
-                
-                # Skip printing current position before update
-                before_area_id = None
-                before_update_res = await execute_supabase_query(lambda: supa.table('npc').select('spawn').eq('id', npc_id).maybe_single().execute())
-                if before_update_res and before_update_res.data and before_update_res.data.get('spawn'):
-                    before_pos = before_update_res.data['spawn']
-                    before_area_id = before_pos.get('areaId')
-                
                 npc_update_payload = {'current_action_id': new_action_instance_id}
-                if new_position_payload: npc_update_payload['spawn'] = new_position_payload
-                update_res = await execute_supabase_query(lambda: supa.table('npc').update(npc_update_payload).eq('id', npc_id).execute())
+                action_moved_npc = False
+
+                if object_id_for_new_action:
+                    obj_res = await execute_supabase_query(lambda: supa.table('object').select('area_id, name').eq('id', object_id_for_new_action).maybe_single().execute()) # x,y from object not used for random pos
+                    if obj_res and obj_res.data and obj_res.data.get('area_id'):
+                        obj_data = obj_res.data
+                        target_area_id_for_action = obj_data['area_id']
+                        
+                        # Use EXPECTED_AREA_WIDTH/HEIGHT for random positioning within the target area
+                        effective_movable_width = EXPECTED_AREA_WIDTH - 2 * MOVEMENT_AREA_MARGIN
+                        effective_movable_height = EXPECTED_AREA_HEIGHT - 2 * MOVEMENT_AREA_MARGIN
+
+                        if effective_movable_width < 1 or effective_movable_height < 1:
+                            action_target_x = EXPECTED_AREA_WIDTH / 2
+                            action_target_y = EXPECTED_AREA_HEIGHT / 2
+                        else:
+                            action_target_x = random.uniform(MOVEMENT_AREA_MARGIN, EXPECTED_AREA_WIDTH - MOVEMENT_AREA_MARGIN)
+                            action_target_y = random.uniform(MOVEMENT_AREA_MARGIN, EXPECTED_AREA_HEIGHT - MOVEMENT_AREA_MARGIN)
+                        
+                        action_position_payload = {
+                            'x': action_target_x, 
+                            'y': action_target_y, 
+                            'areaId': target_area_id_for_action # Use areaId from object
+                        }
+                        npc_update_payload['spawn'] = action_position_payload
+                        action_moved_npc = True
                 
-                # Skip verbose update verification
-                after_area_id = None
-                after_update_res = await execute_supabase_query(lambda: supa.table('npc').select('spawn').eq('id', npc_id).maybe_single().execute())
-                if after_update_res and after_update_res.data and after_update_res.data.get('spawn'):
-                    after_pos = after_update_res.data['spawn']
-                    after_area_id = after_pos.get('areaId')
-                    
-                    # Check if area changed but don't log verbose warnings
+                await execute_supabase_query(lambda: supa.table('npc').update(npc_update_payload).eq('id', npc_id).execute())
+                current_action_instance_id = new_action_instance_id
+                new_action_started_this_tick = True
+
+                if action_moved_npc:
+                    before_area_id = current_position_data.get('areaId')
+                    current_position_data = npc_update_payload['spawn'] # Update local state
+                    after_area_id = current_position_data.get('areaId')
                     if before_area_id != after_area_id and before_area_id is not None and after_area_id is not None:
-                        await create_area_change_observations(
-                            npc_id, 
-                            npc_name, 
-                            before_area_id, 
-                            after_area_id, 
-                            all_npcs_data, 
-                            current_sim_minutes_total
-                        )
+                        await create_area_change_observations(npc_id, npc_name, before_area_id, after_area_id, all_npcs_data, current_sim_minutes_total)
                 
                 await broadcast_ws_message("action_start", {"npc_name": npc_name, "action_title": action_title_log, "emoji": action_emoji_log, "sim_time": new_sim_min_of_day, "day": actual_current_day})
-                current_action_instance_id = new_action_instance_id # Update for current tick
-                is_idle = False
-
-            else: # No suitable queued action found in the existing plan for the current time.
-                # No logging for idle NPCs
-                # Ensure current_action_id on NPC is None if they truly have nothing from their plan
-                if npc_snapshot.get('current_action_id'): # If they *thought* they had an action but it wasn't suitable
+            else: # No next action to start
+                if npc_snapshot.get('current_action_id'): # Clear if somehow still set (e.g., plan deleted)
                     await execute_supabase_query(lambda: supa.table('npc').update({'current_action_id': None}).eq('id', npc_id).execute())
-                current_action_instance_id = None # Explicitly set for the idle wander check below
-                is_idle = True
+                current_action_instance_id = None
 
-        # 3. If effectively idle, consider random movement
-        # (The is_truly_idle_for_wander logic from before needs to be re-evaluated based on current_action_instance_id directly)
-        if not current_action_instance_id: # Simpler check: if no action is active, NPC is idle for wandering
-            if current_position_data and current_position_data.get('areaId') and all_areas_data:
-                if random.random() < 0.40: # Increased idle wander chance from 0.25 to 0.40
-                    current_area_id = current_position_data.get('areaId')
-                    # Find the area bounds for the current area
-                    current_area_bounds = None
-                    for area in all_areas_data:
-                        if area.get('id') == current_area_id and area.get('bounds'):
-                            current_area_bounds = area.get('bounds')
-                            break
-                    
-                    if current_area_bounds:
-                        # Calculate new random position within the area bounds
-                        # Add some margins to keep NPCs away from the edges
-                        margin = 20
-                        min_x = current_area_bounds.get('x', 0) + margin
-                        max_x = current_area_bounds.get('x', 0) + current_area_bounds.get('w', 100) - margin
-                        min_y = current_area_bounds.get('y', 0) + margin
-                        max_y = current_area_bounds.get('y', 0) + current_area_bounds.get('h', 100) - margin
-                        
-                        # Generate random position within bounds
-                        new_x = random.uniform(min_x, max_x)
-                        new_y = random.uniform(min_y, max_y)
-                        
-                        # Update the NPC's position
-                        new_position = {
-                            'x': new_x,
-                            'y': new_y,
-                            'areaId': current_area_id  # Keep in same area
-                        }
-                        
-                        # No logging for idle movement
-                        await execute_supabase_query(lambda: supa.table('npc').update({'spawn': new_position}).eq('id', npc_id).execute())
-                    else:
-                        # If we couldn't find bounds for the current area, try a random area change (less frequently)
-                        if random.random() < 0.3 and len(all_areas_data) > 1: # Increased from 0.1 to 0.3
-                            # Choose a random different area
-                            available_areas = [area for area in all_areas_data if area.get('id') != current_area_id and area.get('bounds')]
-                            if available_areas:
-                                target_area = random.choice(available_areas)
-                                target_bounds = target_area.get('bounds')
-                                
-                                if target_bounds:
-                                    # Calculate position in new area
-                                    margin = 20
-                                    min_x = target_bounds.get('x', 0) + margin
-                                    max_x = target_bounds.get('x', 0) + target_bounds.get('w', 100) - margin
-                                    min_y = target_bounds.get('y', 0) + margin
-                                    max_y = target_bounds.get('y', 0) + target_bounds.get('h', 100) - margin
-                                    
-                                    # Generate random position within bounds
-                                    new_x = random.uniform(min_x, max_x)
-                                    new_y = random.uniform(min_y, max_y)
-                                    
-                                    # Update the NPC's position
-                                    new_position = {
-                                        'x': new_x,
-                                        'y': new_y,
-                                        'areaId': target_area.get('id')  # Set new area
-                                    }
-                                    
-                                    # No logging for area change
-                                    await execute_supabase_query(lambda: supa.table('npc').update({'spawn': new_position}).eq('id', npc_id).execute())
-                                    
-                                    # Create observation memory for area change
-                                    await create_area_change_observations(npc_id, npc_name, current_area_id, target_area.get('id'), all_npcs_data, current_sim_minutes_total)
+        # 3. Always-on Same-Area Wander
+        # This wander happens if no new action started this tick OR if a new action started but didn't move the NPC.
+        # If an action DID move the NPC, this wander logic is skipped for this tick to avoid immediate overwrite.
+        # The probability controls how often wander occurs even if eligible.
+        
+        perform_wander_this_tick = False
+        
+        # Determine NPC-specific wander probability from DB field, with a default
+        npc_wander_probability_from_db = npc_snapshot.get('wander_probability')
+        if isinstance(npc_wander_probability_from_db, (float, int)) and 0.0 <= float(npc_wander_probability_from_db) <= 1.0:
+            npc_specific_wander_probability = float(npc_wander_probability_from_db)
+        else:
+            # Default if not set, null, or invalid. Log if it's set but invalid.
+            if npc_wander_probability_from_db is not None:
+                print(f"[Scheduler] NPC {npc_name} has invalid wander_probability '{npc_wander_probability_from_db}'. Defaulting to 0.4.")
+            npc_specific_wander_probability = 0.40 
+
+        if not new_action_started_this_tick or (new_action_started_this_tick and not action_moved_npc):
+            if random.random() < npc_specific_wander_probability: # Use NPC-specific probability
+                 perform_wander_this_tick = True
+
+        if perform_wander_this_tick:
+            current_area_id_for_wander = current_position_data.get('areaId')
+            if current_area_id_for_wander: # Ensure NPC is in a known area
+                # We assume the area uses EXPECTED_AREA_WIDTH/HEIGHT for its local coordinate system
+                effective_movable_width = EXPECTED_AREA_WIDTH - 2 * MOVEMENT_AREA_MARGIN
+                effective_movable_height = EXPECTED_AREA_HEIGHT - 2 * MOVEMENT_AREA_MARGIN
+
+                if effective_movable_width < 1 or effective_movable_height < 1:
+                    wander_target_x = EXPECTED_AREA_WIDTH / 2
+                    wander_target_y = EXPECTED_AREA_HEIGHT / 2
+                else:
+                    wander_target_x = random.uniform(MOVEMENT_AREA_MARGIN, EXPECTED_AREA_WIDTH - MOVEMENT_AREA_MARGIN)
+                    wander_target_y = random.uniform(MOVEMENT_AREA_MARGIN, EXPECTED_AREA_HEIGHT - MOVEMENT_AREA_MARGIN)
+                
+                # Only apply wander if the new position is different from current
+                current_x = current_position_data.get('x')
+                current_y = current_position_data.get('y')
+
+                if wander_target_x != current_x or wander_target_y != current_y:
+                    wander_position_payload = {
+                        'x': wander_target_x,
+                        'y': wander_target_y,
+                        'areaId': current_area_id_for_wander # Keep same areaId
+                    }
+                    await execute_supabase_query(lambda: supa.table('npc').update({'spawn': wander_position_payload}).eq('id', npc_id).execute())
+                    # If wander moves, current_position_data is updated for any subsequent logic in THIS tick (none currently)
+                    # current_position_data = wander_position_payload 
+                    # print(f"[MOTION_WANDER] NPC {npc_id} ({npc_name}) wandered in area {current_area_id_for_wander} to ({wander_target_x:.2f}, {wander_target_y:.2f})")
+
 
 # Helper function to generate observations for NPC area changes
 async def create_area_change_observations(moving_npc_id, moving_npc_name, from_area_id, to_area_id, all_npcs_data, current_sim_minutes_total):
@@ -411,7 +364,7 @@ async def advance_tick():
         
         # Fetch all NPCs and Areas once for this tick if needed by sub-functions
         # These are used by update_npc_actions_and_state and encounter_detection
-        all_npcs_res = await execute_supabase_query(lambda: supa.table('npc').select('id, name, current_action_id, spawn, traits').execute())
+        all_npcs_res = await execute_supabase_query(lambda: supa.table('npc').select('id, name, current_action_id, spawn, traits, wander_probability').execute())
         all_npcs_data = all_npcs_res.data or []
         all_areas_res = await execute_supabase_query(lambda: supa.table('area').select('id, bounds').execute())
         all_areas_data_for_tick = all_areas_res.data or []

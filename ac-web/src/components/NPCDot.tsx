@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { Circle, Text as KonvaText, Group } from 'react-konva';
 import Konva from 'konva'; // Import Konva for Tween
 import type { DisplayNPC } from '../store/simStore'; // Assuming DisplayNPC includes x, y, emoji, name, id
@@ -37,231 +37,216 @@ const NPCDot: React.FC<NPCDotProps> = ({ npc, color }) => {
     const groupRef = useRef<Konva.Group>(null); // Ref for the Konva Group
     const { openNPCDetailModal } = useSimActions(); // Get the action
     const areas = useSimStore(state => state.areas); // Get areas from store
-    const apiUrl = import.meta.env.VITE_API_URL; // Needed for the action
-    const lastPositionRef = useRef({ x: npc.x || 0, y: npc.y || 0 });
+    const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000'; // Needed for the action
+    const lastPositionRef = useRef<{ x: number; y: number } | undefined>(undefined); // Stores last *screen* position
     const idleAnimationTimerRef = useRef<number | null>(null);
     const isMovingRef = useRef(false);
     const currentTweenRef = useRef<Konva.Tween | null>(null);
     const isValidPosition = typeof npc.x === 'number' && typeof npc.y === 'number';
-    const lastAreaIdRef = useRef<string | undefined>(
-        (npc.spawn as { areaId?: string } | undefined)?.areaId
-    );
 
     // Use state for the initial position - hooks must be called in the same order on every render
-    const [currentX, setCurrentX] = useState(isValidPosition ? npc.x : 0);
-    const [currentY, setCurrentY] = useState(isValidPosition ? npc.y : 0);
+    const [currentX, setCurrentX] = useState<number>(0); // Initialize to 0 to ensure groupRef is populated
+    const [currentY, setCurrentY] = useState<number>(0); // Initialize to 0 to ensure groupRef is populated
 
     // Function to get the correct screen position based on area
-    const getScreenPosition = () => {
-        // Type-safely get the areaId
+    const getScreenPosition = useCallback(() => {
         const spawn = npc.spawn as {areaId?: string} | undefined;
         const areaId = spawn?.areaId;
         
-        if (!areaId) return { x: npc.x || 0, y: npc.y || 0 };
+        if (!areaId || !npc.x || !npc.y) { // Ensure npc.x and npc.y are valid
+            // Return a default or last known good if appropriate, or current groupRef position
+            if (groupRef.current) return { x: groupRef.current.x(), y: groupRef.current.y() };
+            return { x: 0, y: 0 }; // Fallback
+        }
 
-        // Find the area by ID
         const area = areas.find(a => a.id === areaId);
-        if (!area) return { x: npc.x || 0, y: npc.y || 0 };
+        if (!area) {
+            if (groupRef.current) return { x: groupRef.current.x(), y: groupRef.current.y() };
+            return { x: 0, y: 0 }; // Fallback
+        }
 
-        // Get the offset for this area name
         const offset = AREA_OFFSETS[area.name] || { x: 0, y: 0 };
-
-        // Calculate raw coordinates based on area offset
-        let rawX = offset.x + (npc.x || 0);
-        let rawY = offset.y + (npc.y || 0);
+        let rawX = offset.x + npc.x;
+        let rawY = offset.y + npc.y;
         
         // Apply boundary constraints - keep NPCs within their respective quadrants
         // Add larger margins to ensure name labels are visible
-        const MARGIN = 50; // Increased from 20 to 50 pixels
+        const MARGIN = 50; // Was 20, changed back to 50 to prevent label cutoff
         
-        // Calculate area boundaries
         const minX = offset.x + MARGIN;
         const maxX = offset.x + AREA_WIDTH - MARGIN;
         const minY = offset.y + MARGIN;
         const maxY = offset.y + AREA_HEIGHT - MARGIN;
         
-        // Constrain coordinates within boundaries
         const constrainedX = Math.max(minX, Math.min(maxX, rawX));
         const constrainedY = Math.max(minY, Math.min(maxY, rawY));
         
-        // Return constrained coordinates
         return {
             x: constrainedX,
             y: constrainedY
         };
-    };
+    }, [npc.x, npc.y, npc.spawn, areas]);
 
-    // Effect to handle setting initial position or hard jumps if npc.id changes or area changes
+    // Effect for initial placement and when NPC ID changes
     useEffect(() => {
-        if (groupRef.current && isValidPosition) {
-            const spawn = npc.spawn as {areaId?: string} | undefined;
-            const areaId = spawn?.areaId;
+        if (isValidPosition && groupRef.current) {
+            console.log(`NPC ${npc.name} (${npc.id}): Initial Placement or ID Change.`);
+            const initialScreenPos = getScreenPosition();
             
-            // Do a hard position reset if the NPC has changed areas
-            const areaChanged = lastAreaIdRef.current !== areaId;
-            if (areaChanged) {
-                lastAreaIdRef.current = areaId;
-                
-                // Stop any running tweens
-                if (currentTweenRef.current) {
-                    currentTweenRef.current.destroy();
-                    currentTweenRef.current = null;
-                }
-                
-                // Hard position reset for area changes
-                const position = getScreenPosition();
-                groupRef.current.x(position.x);
-                groupRef.current.y(position.y);
-                setCurrentX(position.x);
-                setCurrentY(position.y);
-                lastPositionRef.current = position;
+            groupRef.current.position(initialScreenPos);
+            setCurrentX(initialScreenPos.x);
+            setCurrentY(initialScreenPos.y);
+            lastPositionRef.current = initialScreenPos;
+            
+            if (currentTweenRef.current) {
+                currentTweenRef.current.destroy();
+                currentTweenRef.current = null;
             }
-        }
-    }, [npc.id, npc.spawn, areas, isValidPosition]);
-
-    // Effect to animate to new target npc.x, npc.y from props
-    useEffect(() => {
-        if (!isValidPosition || !groupRef.current) return;
-        
-        // Calculate adjusted position based on area offset
-        const position = getScreenPosition();
-        
-        // Check if position has actually changed significantly (use a small threshold to reduce jitter)
-        const POSITION_THRESHOLD = 1.0; // Only update if position changed by more than 1px
-        const xDiff = Math.abs(position.x - lastPositionRef.current.x);
-        const yDiff = Math.abs(position.y - lastPositionRef.current.y);
-        
-        if (xDiff > POSITION_THRESHOLD || yDiff > POSITION_THRESHOLD) {
-            isMovingRef.current = true;
-            
-            // Stop any existing idle animations
             if (idleAnimationTimerRef.current !== null) {
                 window.clearTimeout(idleAnimationTimerRef.current);
                 idleAnimationTimerRef.current = null;
             }
-            
-            // Stop any running tweens
+            isMovingRef.current = false;
+            startIdleAnimations(); // Ensure idle animations start after initial placement
+        }
+    }, [npc.id, isValidPosition]); // REVISED DEPENDENCIES: Removed getScreenPosition and npc.name
+
+    // Effect to animate NPC movement based on prop changes (x, y, or areaId)
+    useEffect(() => {
+        if (!isValidPosition || !groupRef.current ) return;
+
+        const targetScreenPos = getScreenPosition();
+
+        // If lastPositionRef is not set yet (e.g. initial render flow), let initial placement handle it.
+        // This effect should only animate from an established position.
+        if (!lastPositionRef.current) {
+            // This case should ideally be covered by the initial placement effect.
+            // If we reach here, it might mean initial placement didn't set lastPositionRef yet.
+            // For safety, one could set it here, but it might cause a jump before animation.
+            // console.warn(`NPC ${npc.name} (${npc.id}): Animation effect ran before lastPositionRef was set.`);
+            // For now, we assume initial placement effect will set lastPositionRef.current before this runs effectively.
+            // Or, we could set the initial position here if lastPositionRef is undefined, then subsequent runs animate.
+            // Let's assume the first useEffect handles the very first placement.
+            return; 
+        }
+
+        const currentVisualPos = lastPositionRef.current; // Animate from the last settled position
+
+        const POSITION_THRESHOLD = 1.0;
+        const xDiff = Math.abs(targetScreenPos.x - currentVisualPos.x);
+        const yDiff = Math.abs(targetScreenPos.y - currentVisualPos.y);
+
+        if (xDiff > POSITION_THRESHOLD || yDiff > POSITION_THRESHOLD) {
+            isMovingRef.current = true;
+            // Removed pathPoints update
+
+            if (idleAnimationTimerRef.current !== null) {
+                window.clearTimeout(idleAnimationTimerRef.current);
+                idleAnimationTimerRef.current = null;
+            }
             if (currentTweenRef.current) {
                 currentTweenRef.current.destroy();
                 currentTweenRef.current = null;
             }
             
-            // Animate from current *visual* position to new target position
-            const tween = new Konva.Tween({
-                node: groupRef.current,
+            currentTweenRef.current = new Konva.Tween({
+                node: groupRef.current, // Konva tweens from current node's x/y
                 duration: ANIMATION_DURATION_SECONDS,
-                x: position.x,
-                y: position.y,
+                x: targetScreenPos.x,
+                y: targetScreenPos.y,
                 easing: Konva.Easings.EaseInOut,
                 onFinish: () => {
-                    // Ensure final position is accurately set
                     if (groupRef.current) {
-                        groupRef.current.x(position.x);
-                        groupRef.current.y(position.y);
-                        lastPositionRef.current = position;
-                        isMovingRef.current = false;
-                        
-                        // Only start idle animations if we're not still moving
-                        if (!isMovingRef.current) {
-                            startIdleAnimations();
-                        }
+                        // Position is set by tween. Update ref and state.
+                        lastPositionRef.current = { x: groupRef.current.x(), y: groupRef.current.y() };
+                        setCurrentX(groupRef.current.x());
+                        setCurrentY(groupRef.current.y());
                     }
+                    isMovingRef.current = false;
+                    startIdleAnimations();
                 }
             });
-            
-            currentTweenRef.current = tween;
-            tween.play();
-            
-            return () => {
-                if (currentTweenRef.current === tween) {
-                    tween.destroy();
-                    currentTweenRef.current = null;
-                }
-            };
-        }
-    }, [npc.x, npc.y, npc.spawn, areas, isValidPosition]); // Trigger when coordinates or areaId changes
-
-    // Effect to handle idle animations when NPC isn't moving
-    useEffect(() => {
-        // Start idle animations on mount only if not already moving and position is valid
-        if (!isMovingRef.current && isValidPosition) {
-            startIdleAnimations();
-        }
-        
-        return () => {
-            // Clean up on unmount
-            if (idleAnimationTimerRef.current !== null) {
-                window.clearTimeout(idleAnimationTimerRef.current);
-                idleAnimationTimerRef.current = null;
+            currentTweenRef.current.play();
+        } else {
+            // No significant movement, ensure idle animations are running if not already moving
+            if (!isMovingRef.current && lastPositionRef.current) { // Added lastPositionRef.current check for safety
+                startIdleAnimations();
             }
-            
+        }
+        // Cleanup function for the tween
+        return () => {
             if (currentTweenRef.current) {
                 currentTweenRef.current.destroy();
                 currentTweenRef.current = null;
             }
         };
-    }, [isValidPosition]);
+
+    }, [npc.x, npc.y, npc.spawn, areas, isValidPosition, getScreenPosition, npc.name]); // npc.name for logs, getScreenPosition due to its own internal deps
+
+    useEffect(() => {
+        // This effect ensures idle animations start correctly initially or if props allow
+        if (groupRef.current && !isMovingRef.current && isValidPosition && lastPositionRef.current) {
+            startIdleAnimations();
+        }
+        return () => {
+            if (idleAnimationTimerRef.current !== null) {
+                window.clearTimeout(idleAnimationTimerRef.current);
+                idleAnimationTimerRef.current = null;
+            }
+            if (currentTweenRef.current) { // Ensure ongoing movement tweens are also cleaned up on unmount
+                currentTweenRef.current.destroy();
+                currentTweenRef.current = null;
+            }
+        };
+    }, [isValidPosition]); // Re-check startIdleAnimations if isValidPosition changes
 
     const startIdleAnimations = () => {
-        // Clear any existing timer
         if (idleAnimationTimerRef.current !== null) {
             window.clearTimeout(idleAnimationTimerRef.current);
             idleAnimationTimerRef.current = null;
         }
-        
-        // Schedule the next idle animation (using minimal movements)
         idleAnimationTimerRef.current = window.setTimeout(() => {
-            // Don't start idle animations if we're in the middle of a real movement
-            if (isMovingRef.current || !groupRef.current) {
-                startIdleAnimations();
+            if (isMovingRef.current || !groupRef.current || !lastPositionRef.current) {
+                startIdleAnimations(); 
                 return;
             }
-            
-            // Generate random micro-movement within IDLE_MOVEMENT_RANGE
+            const baseX = lastPositionRef.current.x;
+            const baseY = lastPositionRef.current.y;
             const offsetX = (Math.random() * 2 - 1) * IDLE_MOVEMENT_RANGE;
             const offsetY = (Math.random() * 2 - 1) * IDLE_MOVEMENT_RANGE;
             
-            // Get the base position stored in lastPositionRef
-            const baseX = lastPositionRef.current.x;
-            const baseY = lastPositionRef.current.y;
-            
-            // Animate to the slightly offset position
             const tween = new Konva.Tween({
                 node: groupRef.current,
-                duration: 0.5, // Quick, subtle movement
+                duration: 0.5, 
                 x: baseX + offsetX,
                 y: baseY + offsetY,
                 easing: Konva.Easings.EaseInOut,
                 onFinish: () => {
-                    // After moving to offset position, schedule return to base position
                     if (groupRef.current && !isMovingRef.current) {
                         setTimeout(() => {
-                            if (groupRef.current && !isMovingRef.current) {
-                                // Return to base position
+                            if (groupRef.current && !isMovingRef.current && lastPositionRef.current) { // check lastPositionRef again
                                 const returnTween = new Konva.Tween({
                                     node: groupRef.current,
                                     duration: 0.5,
-                                    x: baseX,
+                                    x: baseX, // Return to the last known major position
                                     y: baseY,
                                     easing: Konva.Easings.EaseInOut,
                                     onFinish: () => {
                                         if (!isMovingRef.current) {
-                                            startIdleAnimations(); // Continue the cycle
+                                            startIdleAnimations();
                                         }
                                     }
                                 });
-                                
-                                currentTweenRef.current = returnTween;
+                                currentTweenRef.current = returnTween; // Manage this tween
                                 returnTween.play();
                             }
-                        }, 800); // Small pause at the offset position
+                        }, 800);
                     }
                 }
             });
-            
-            currentTweenRef.current = tween;
+            currentTweenRef.current = tween; // Manage this tween
             tween.play();
-        }, IDLE_MOVEMENT_INTERVAL_MS + Math.random() * 1000); // Add some randomness to the interval
+        }, IDLE_MOVEMENT_INTERVAL_MS + Math.random() * 1000);
     };
 
     const handleDotClick = () => {
@@ -269,7 +254,6 @@ const NPCDot: React.FC<NPCDotProps> = ({ npc, color }) => {
             openNPCDetailModal(npc.id, apiUrl);
         } else {
             console.error("Cannot open NPC details: API URL is not defined.");
-            // Optionally push a log to the store: actions.pushLog("Error: Missing API URL for details.");
         }
     };
 
@@ -283,8 +267,8 @@ const NPCDot: React.FC<NPCDotProps> = ({ npc, color }) => {
             ref={groupRef} 
             key={npc.id} 
             id={npc.id} 
-            x={currentX} // Use state for initial/non-tweened position
-            y={currentY} // Use state for initial/non-tweened position
+            x={currentX} 
+            y={currentY} 
             onClick={handleDotClick} 
             onTap={handleDotClick} 
             hitGraphEnabled={true}
