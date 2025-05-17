@@ -162,122 +162,50 @@ async def get_npc_ui_details(npc_id_to_fetch: str, current_day_from_env: int) ->
                                 area_name=area_name
                             ))
         
-        # Get latest reflection for backward compatibility
         latest_reflection_str = None
-        
-        # Get up to 5 reflections
         reflections_list: List[ReflectionInfo] = []
-        reflections_res = await execute_supabase_query(lambda: supa.table('memory').select('content, sim_min').eq('npc_id', npc_id_to_fetch).eq('kind', 'reflect').order('sim_min', desc=True).limit(5).execute())
-        if reflections_res and reflections_res.data:
-            for idx, reflection in enumerate(reflections_res.data):
-                content = reflection.get('content', '')
-                sim_min = reflection.get('sim_min')
-                time_str = f"Day {sim_min // 1440 + 1}, {(sim_min % 1440) // 60:02d}:{(sim_min % 1440) % 60:02d}" if sim_min is not None else ""
-                
-                reflections_list.append(ReflectionInfo(
-                    content=content,
-                    time=time_str
-                ))
-                
-                # Set the first one as the latest_reflection for backward compatibility
-                if idx == 0:
-                    latest_reflection_str = content
-
-        # Get memory stream events (most recent 50)
         memory_stream_list: List[MemoryEvent] = []
         
-        # Keep the dedicated debug query but don't log results
-        reflect_plan_debug_res = await execute_supabase_query(lambda: supa.table('memory')
-            .select('id, kind, sim_min')
-            .eq('npc_id', npc_id_to_fetch)
-            .in_('kind', ['reflect', 'plan'])
-            .order('sim_min', desc=True)
-            .limit(10)
-            .execute())
-        
-        # Get a combined total of 50 memories including at least 5 reflect and 5 plan (if they exist)
-        # This ensures we get a good mix of memory types
-        memory_stream_res = await execute_supabase_query(lambda: supa.table('memory')
+        # Fetch up to 50 most recent memories of all types
+        all_recent_memories_res = await execute_supabase_query(lambda: supa.table('memory')
             .select('content, sim_min, kind')
             .eq('npc_id', npc_id_to_fetch)
             .order('sim_min', desc=True)
             .limit(50)
             .execute())
-        
-        # Get the top reflect and plan memories separately to ensure they're included
-        reflect_memories_res = await execute_supabase_query(lambda: supa.table('memory')
-            .select('content, sim_min, kind')
-            .eq('npc_id', npc_id_to_fetch)
-            .eq('kind', 'reflect')
-            .order('sim_min', desc=True)
-            .limit(5)
-            .execute())
-            
-        plan_memories_res = await execute_supabase_query(lambda: supa.table('memory')
-            .select('content, sim_min, kind')
-            .eq('npc_id', npc_id_to_fetch)
-            .eq('kind', 'plan')
-            .order('sim_min', desc=True)
-            .limit(5)
-            .execute())
-        
-        # Skip memory type counting and verbose logging
-        if memory_stream_res and memory_stream_res.data:
-            for memory in memory_stream_res.data:
+
+        if all_recent_memories_res and all_recent_memories_res.data:
+            temp_reflections: List[ReflectionInfo] = []
+            for memory in all_recent_memories_res.data:
                 content = memory.get('content', '')
                 sim_min = memory.get('sim_min')
-                mem_type = memory.get('kind', 'unknown')
-                time_str = f"Day {sim_min // 1440 + 1}, {(sim_min % 1440) // 60:02d}:{(sim_min % 1440) % 60:02d}" if sim_min is not None else ""
+                mem_kind = memory.get('kind', 'unknown')
                 
+                time_str = ""
+                if sim_min is not None:
+                    day_num = sim_min // 1440 + 1
+                    min_of_day = sim_min % 1440
+                    hour = min_of_day // 60
+                    minute = min_of_day % 60
+                    time_str = f"Day {day_num}, {hour:02d}:{minute:02d}"
+
+                # Populate overall memory_stream_list
                 memory_stream_list.append(MemoryEvent(
                     content=content,
                     time=time_str,
-                    type=mem_type
+                    type=mem_kind
                 ))
-        
-        # Add the reflect and plan memories
-        if reflect_memories_res and reflect_memories_res.data:
-            for memory in reflect_memories_res.data:
-                content = memory.get('content', '')
-                sim_min = memory.get('sim_min')
-                mem_type = memory.get('kind', 'unknown')
-                time_str = f"Day {sim_min // 1440 + 1}, {(sim_min % 1440) // 60:02d}:{(sim_min % 1440) % 60:02d}" if sim_min is not None else ""
                 
-                # Check if this memory is already in the list
-                already_included = False
-                for existing_mem in memory_stream_list:
-                    if existing_mem.content == content and existing_mem.time == time_str:
-                        already_included = True
-                        break
-                
-                if not already_included:
-                    memory_stream_list.append(MemoryEvent(
-                        content=content,
-                        time=time_str,
-                        type=mem_type
-                    ))
-        
-        # Add the plan memories
-        if plan_memories_res and plan_memories_res.data:
-            for memory in plan_memories_res.data:
-                content = memory.get('content', '')
-                sim_min = memory.get('sim_min')
-                mem_type = memory.get('kind', 'unknown')
-                time_str = f"Day {sim_min // 1440 + 1}, {(sim_min % 1440) // 60:02d}:{(sim_min % 1440) % 60:02d}" if sim_min is not None else ""
-                
-                # Check if this memory is already in the list
-                already_included = False
-                for existing_mem in memory_stream_list:
-                    if existing_mem.content == content and existing_mem.time == time_str:
-                        already_included = True
-                        break
-                
-                if not already_included:
-                    memory_stream_list.append(MemoryEvent(
-                        content=content,
-                        time=time_str,
-                        type=mem_type
-                    ))
+                # Populate reflections_list (up to 5) and latest_reflection_str
+                if mem_kind == 'reflect':
+                    reflection_info = ReflectionInfo(content=content, time=time_str)
+                    temp_reflections.append(reflection_info)
+
+            # Sort temp_reflections by time (desc based on sim_min) if not already guaranteed by query
+            # The query already sorts by sim_min desc, so the first ones encountered are the latest.
+            reflections_list = temp_reflections[:5] # Take the first 5 found
+            if reflections_list:
+                latest_reflection_str = reflections_list[0].content
 
         return NPCUIDetailData(
             npc_id=npc_id_to_fetch, npc_name=npc_name,

@@ -17,9 +17,11 @@ from .prompts import (
 )
 from .memory_service import retrieve_memories, get_embedding 
 from .services import supa, execute_supabase_query
+from .websocket_utils import register_ws, unregister_ws, broadcast_ws_message
+from .planning_and_reflection import run_daily_planning, run_nightly_reflection # ADD THIS IMPORT
 
 settings = get_settings()
-_ws_clients: List[Any] = [] # Renamed _ws to _ws_clients for clarity
+# _ws_clients: List[Any] = [] # Renamed _ws to _ws_clients for clarity # REMOVE THIS LINE
 SIM_DAY_MINUTES = 24 * 60
 MAX_CONCURRENT_DB_OPS = 5 # Tune this value
 db_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DB_OPS)
@@ -45,263 +47,15 @@ async def get_current_sim_time_and_day() -> Dict[str, int]:
         print(f"Error fetching sim time and day: {e}")
         return {"sim_min": 0, "day": 1} # Fallback
 
-async def run_daily_planning(current_day: int, current_sim_minutes_total: int, specific_npc_id: Optional[str] = None):
-    print(f"PLANNING: Day {current_day} (5:00 AM) {'for NPC ' + specific_npc_id if specific_npc_id else 'for ALL NPCs'}")
-    try:
-        if specific_npc_id:
-            npcs_response_obj = await execute_supabase_query(lambda: supa.table('npc').select('id, name, traits, backstory').eq('id', specific_npc_id).execute()) # Fetch only specific NPC
-        else:
-            npcs_response_obj = await execute_supabase_query(lambda: supa.table('npc').select('id, name, traits, backstory').execute()) # Fetch all NPCs
-        
-        if not (npcs_response_obj and npcs_response_obj.data):
-            print(f"PLANNING: No NPC(s) found {'with ID ' + specific_npc_id if specific_npc_id else ''}.")
-            return
-        npcs_data = npcs_response_obj.data if isinstance(npcs_response_obj.data, list) else [npcs_response_obj.data] # Ensure npcs_data is a list
-        sim_date_str = f"Day {current_day}"
-        
-        all_action_defs_response = await execute_supabase_query(lambda: supa.table('action_def').select('id, title, base_minutes').execute())
-        action_defs_data = all_action_defs_response.data or []
-        action_defs_map_title_to_id = {ad['title']: ad['id'] for ad in action_defs_data if ad.get('title')}
-        action_defs_map_id_to_duration = {ad['id']: ad.get('base_minutes', 30) for ad in action_defs_data if ad.get('id')}
-        # print(f"  [ACTION DEF LOAD FULL] Maps created. Titles: {len(action_defs_map_title_to_id)}, Durations: {len(action_defs_map_id_to_duration)}") # REMOVE
+# DELETE run_daily_planning function definition (approx. lines 45-195)
+# async def run_daily_planning(current_day: int, current_sim_minutes_total: int, specific_npc_id: Optional[str] = None):
+# ... (entire function body) ...
+# import traceback; traceback.print_exc()
 
-        # Fetch all available objects once to link actions to them
-        all_objects_response = await execute_supabase_query(lambda: supa.table('object').select('id, name, area_id').execute())
-        all_objects_data = all_objects_response.data or []
-        # Create a map for quick lookup, e.g., by object name or type if we had types
-        # For now, a simple list to iterate and find first match
-
-        for npc in npcs_data:
-            npc_id = npc['id']; npc_name = npc['name']
-            await broadcast_ws_message("planning_event", {"npc_name": npc_name, "status": "started_planning", "day": current_day})
-            npc_traits_summary = format_traits(npc.get('traits', []))
-            print(f"  PLANNING for {npc_name} (ID: {npc_id})...") # KEEP
-
-            planning_query_text = f"What are important considerations for {npc_name} for planning {sim_date_str}?"
-            retrieved_memories_str = await retrieve_memories(npc_id, planning_query_text, "planning", current_sim_minutes_total)
-            
-            system_prompt = PLAN_SYSTEM_PROMPT_TEMPLATE.format(name=npc_name, sim_date=sim_date_str, traits_summary=npc_traits_summary)
-            user_prompt = PLAN_USER_PROMPT_TEMPLATE.format(retrieved_memories=retrieved_memories_str)
-            raw_plan_text = call_llm(system_prompt, user_prompt, max_tokens=400)
-
-            if not raw_plan_text:
-                print(f"    PLANNING - LLM failed to generate a plan for {npc_name}.")
-                await broadcast_ws_message("planning_event", {"npc_name": npc_name, "status": "failed_planning", "day": current_day})
-                continue
-            # print(f"    FULL - Raw plan for {npc_name}:\n{raw_plan_text}") # REMOVE
-
-            plan_action_instance_ids = []
-            parsed_actions_for_log = []
-            for line in raw_plan_text.strip().split('\n'):
-                match = re.fullmatch(r"(?:\d+\.\s*)?(\d{2}):(\d{2})\s*[-—–]\s*(.+)", line.strip())
-                if match:
-                    hh, mm, action_title_raw = match.groups(); action_title = action_title_raw.strip()
-                    action_start_sim_min_of_day = int(hh) * 60 + int(mm)
-                    action_def_id = action_defs_map_title_to_id.get(action_title)
-
-                    if not action_def_id:
-                        print(f"      Warning: Action title '{action_title}' not found in action_def. Skipping.")
-                        continue
-                    
-                    duration_min = action_defs_map_id_to_duration.get(action_def_id, 30)
-                    # print(f"      [PLAN PARSING {npc_name}] Parsed: {action_title}, ID: {action_def_id}, Start: {action_start_sim_min_of_day}, Dur: {duration_min}") # REMOVE
-
-                    # --- Try to find an object_id for the action ---
-                    object_id_for_action = None
-                    # Simplistic object association logic for MVP
-                    if action_title == "Work":
-                        pc_objects = [obj for obj in all_objects_data if obj.get('name') == "PC"]
-                        if pc_objects: object_id_for_action = pc_objects[0]['id'] # Take the first PC
-                    elif action_title == "Sleep":
-                        bed_objects = [obj for obj in all_objects_data if obj.get('name') == "Bed"]
-                        if bed_objects: object_id_for_action = bed_objects[0]['id'] # Take the first Bed
-                    elif action_title == "Brush Teeth":
-                        toothbrush_objects = [obj for obj in all_objects_data if obj.get('name') == "Toothbrush"]
-                        if toothbrush_objects: object_id_for_action = toothbrush_objects[0]['id']
-                    elif action_title == "Watch TV":
-                        tv_objects = [obj for obj in all_objects_data if obj.get('name') == "TV"]
-                        if tv_objects: object_id_for_action = tv_objects[0]['id']
-                    elif action_title == "Relax on Couch":
-                        couch_objects = [obj for obj in all_objects_data if obj.get('name') == "Couch"]
-                        if couch_objects: object_id_for_action = couch_objects[0]['id']
-                    elif action_title == "Have Coffee":
-                        coffee_table_objects = [obj for obj in all_objects_data if obj.get('name') == "Coffee Table"]
-                        if coffee_table_objects: object_id_for_action = coffee_table_objects[0]['id']
-                    # Add more specific object associations here if needed for other actions
-
-                    action_instance_data = {
-                        'npc_id': npc_id,
-                        'def_id': action_def_id,
-                        'object_id': object_id_for_action, # NEWLY ADDED
-                        'start_min': action_start_sim_min_of_day,
-                        'duration_min': duration_min,
-                        'status': 'queued'
-                    }
-                    action_instance_data_list = [action_instance_data]
-                    # print(f"      [PLAN DB {npc_name}] Inserting action_instance for: {action_title}") # REMOVE
-                    
-                    # Using the simplified insert first, assuming ID is returned in .data by default
-                    def _insert_action_sync(data_list):
-                        return supa.table('action_instance').insert(data_list).execute()
-                    insert_response_obj = await execute_supabase_query(lambda: _insert_action_sync(action_instance_data_list))
-
-                    action_instance_id = None
-                    if insert_response_obj.data and len(insert_response_obj.data) > 0:
-                        action_instance_id = insert_response_obj.data[0].get('id')
-                        if action_instance_id:
-                            plan_action_instance_ids.append(action_instance_id)
-                            parsed_actions_for_log.append(f"{hh}:{mm} - {action_title}")
-                            # print(f"        -> Inserted action_instance ID: {action_instance_id}") # REMOVE or make conditional on VERBOSE_DEBUG flag
-                        else:
-                            print(f"        !!!! Inserted '{action_title}' but ID not in response: {insert_response_obj.data}")
-                    else:
-                        db_error = getattr(insert_response_obj, 'error', None)
-                        print(f"        !!!! Failed to insert '{action_title}'. Error: {db_error}. Data: {insert_response_obj.data}")
-            
-            if plan_action_instance_ids:
-                # print(f"    [PLAN COMMIT {npc_name}] Inserting plan with {len(plan_action_instance_ids)} action IDs.") # REMOVE
-                print(f"    PLANNING - Successfully created plan for {npc_name} with {len(parsed_actions_for_log)} actions.") # KEEP
-                plan_data = {'npc_id': npc_id, 'sim_day': current_day, 'actions': plan_action_instance_ids}
-                await execute_supabase_query(lambda: supa.table('plan').insert(plan_data).execute())
-                
-                plan_memory_content = f"Planned for {sim_date_str}: {len(parsed_actions_for_log)} actions. Details: {'; '.join(parsed_actions_for_log)}"
-                plan_memory_embedding = await get_embedding(plan_memory_content)
-                if plan_memory_embedding:
-                    plan_memory_payload = {'npc_id': npc_id, 'sim_min': current_sim_minutes_total, 'kind': 'plan','content': plan_memory_content, 'importance': 3, 'embedding': plan_memory_embedding}
-                    await execute_supabase_query(lambda: supa.table('memory').insert(plan_memory_payload).execute())
-                    # print(f"      -> PLANNING - Plan memory inserted for {npc_name}.") # REMOVE or summarize
-
-                await broadcast_ws_message("planning_event", {"npc_name": npc_name, "status": "completed_planning", "day": current_day, "num_actions": len(parsed_actions_for_log)})
-            else:
-                print(f"    PLANNING - No valid action instances for {npc_name}, plan not created.") # KEEP
-                await broadcast_ws_message("planning_event", {"npc_name": npc_name, "status": "failed_planning", "day": current_day})
-
-    except Exception as e:
-        print(f"ERROR in run_daily_planning: {e}")
-        import traceback; traceback.print_exc()
-
-async def run_nightly_reflection(day_being_reflected: int, current_sim_minutes_total: int):
-    print(f"REFLECTION: Day {day_being_reflected} (12:00 AM Midnight) ...")
-    try:
-        npcs_response_obj = await execute_supabase_query(lambda: supa.table('npc').select('id, name, traits').execute())
-        if not (npcs_response_obj and npcs_response_obj.data): 
-            print("REFLECTION: No NPCs found.")
-            return
-        
-        sim_date_str = f"Day {day_being_reflected}"
-        for npc in npcs_response_obj.data:
-            npc_id = npc['id']; npc_name = npc['name']
-            await broadcast_ws_message("reflection_event", {"npc_name": npc_name, "status": "started_reflection", "day": day_being_reflected})
-            npc_traits_summary = format_traits(npc.get('traits', []))
-            print(f"  REFLECTING for {npc_name} (ID: {npc_id})...")
-            
-            # Skip memory check debug logs
-            memories_check = await execute_supabase_query(lambda: supa.table('memory')
-                .select('id, kind')
-                .eq('npc_id', npc_id)
-                .eq('kind', 'obs')
-                .order('sim_min', desc=True)
-                .limit(5)
-                .execute())
-            
-            reflection_query_text = f"Key events and main thoughts for {npc_name} on {sim_date_str}?"
-            retrieved_memories_str = await retrieve_memories(npc_id, reflection_query_text, "reflection", current_sim_minutes_total)
-            
-            # Skip retrieved memories debug logs
-            system_prompt = REFLECTION_SYSTEM_PROMPT_TEMPLATE.format(name=npc_name, sim_date=sim_date_str)
-            user_prompt = REFLECTION_USER_PROMPT_TEMPLATE.format(traits_summary=npc_traits_summary, retrieved_memories=retrieved_memories_str)
-            
-            # Call LLM with minimal logging
-            raw_reflection_text = call_llm(system_prompt, user_prompt, max_tokens=300, model="gpt-4o")
-            
-            # Check LLM response
-            if not raw_reflection_text:
-                print(f"  ERROR: LLM returned empty or null response for {npc_name}'s reflection!")
-                continue
-            
-            # Skip printing the full reflection text
-            
-            # Check if the reflection text has any bullet points
-            if '•' not in raw_reflection_text:
-                print(f"  ERROR: No bullet points (•) found in reflection text! Trying to adapt format...")
-                # Try alternative formats - maybe the LLM used different bullet formats
-                lines = raw_reflection_text.strip().split('\n')
-                formatted_lines = []
-                for line in lines:
-                    # Check if it's a numbered line (1. 2. etc)
-                    if re.match(r'^\d+\.', line.strip()):
-                        formatted_lines.append(f"• {line.strip()}")
-                    # Or starts with - or * (common bullet formats)
-                    elif line.strip().startswith('-') or line.strip().startswith('*'):
-                        formatted_lines.append(f"• {line.strip()[1:].strip()}")
-                    elif line.strip():  # Not empty
-                        formatted_lines.append(f"• {line.strip()}")
-                
-                if formatted_lines:
-                    raw_reflection_text = '\n'.join(formatted_lines)
-            
-            reflection_count = 0
-            for line in raw_reflection_text.strip().split('\n'):
-                line = line.strip()
-                if not line: continue
-                
-                content = line
-                importance = 1  # Default importance
-                
-                # Check if line starts with a bullet point - skip verbose logging
-                if not line.startswith('•'):
-                    # Try to handle the case where LLM didn't follow format
-                    if line.startswith('-') or line.startswith('*') or re.match(r'^\d+\.', line):
-                        pass # Process anyway
-                    else:
-                        continue # Skip non-bullet lines
-                
-                # Extract importance if present
-                match = re.search(r"\[Importance:\s*(\d+)\]$", line, re.IGNORECASE)
-                if match: 
-                    try: 
-                        importance = max(1, min(5, int(match.group(1))))
-                        content = re.sub(r"\s*\[Importance:\s*\d+\]$", "", line, flags=re.IGNORECASE).strip()
-                    except ValueError:
-                        pass # Keep default importance if parsing fails
-                else:
-                    # Try alternative format that might be used
-                    alt_match = re.search(r"\(Importance:?\s*(\d+)\)", line, re.IGNORECASE)
-                    if alt_match:
-                        try:
-                            importance = max(1, min(5, int(alt_match.group(1))))
-                            content = re.sub(r"\s*\(Importance:?\s*\d+\)", "", line, flags=re.IGNORECASE).strip()
-                        except ValueError:
-                            pass
-                
-                # Clean up the content
-                content = content.lstrip('• ').lstrip('- ').lstrip('* ').lstrip('1. ').lstrip('2. ').lstrip('3. ').strip()
-                if not content: continue
-                
-                reflection_embedding = await get_embedding(content)
-                if reflection_embedding:
-                    payload = {'npc_id': npc_id, 'sim_min': current_sim_minutes_total, 'kind': 'reflect','content': content, 'importance': importance, 'embedding': reflection_embedding}
-                    
-                    try:
-                        reflection_insert_response = await execute_supabase_query(lambda: supa.table('memory').insert(payload).execute())
-                        
-                        if reflection_insert_response.data and len(reflection_insert_response.data) > 0:
-                            reflection_count += 1
-                        else:
-                            print(f"  ERROR: Failed to store reflection. No data returned.")
-                            if hasattr(reflection_insert_response, 'error') and reflection_insert_response.error:
-                                print(f"  ERROR DETAILS: {reflection_insert_response.error}")
-                    except Exception as insert_err:
-                        print(f"  ERROR: Exception during reflection insert: {insert_err}")
-                else:
-                    print(f"  ERROR: Failed to get embedding for reflection content")
-            
-            # Summary
-            print(f"  SUMMARY: Created {reflection_count} reflections for {npc_name}")
-            await broadcast_ws_message("reflection_event", {"npc_name": npc_name, "status": "completed_reflection", "day": day_being_reflected})
-    except Exception as e:
-        print(f"ERROR in run_nightly_reflection: {e}")
-        import traceback; traceback.print_exc()
+# DELETE run_nightly_reflection function definition (approx. lines 198-312)
+# async def run_nightly_reflection(day_being_reflected: int, current_sim_minutes_total: int):
+# ... (entire function body) ...
+# await broadcast_ws_message("reflection_event", {"npc_name": npc.get('name', 'UNKNOWN'), "status": "error_reflection", "day": day_being_reflected})
 
 # --- Global list for pending dialogues ---
 pending_dialogue_requests: List[Dict[str, Any]] = [] # Stores {npc_a_id, npc_b_id, tick}
@@ -309,10 +63,11 @@ pending_dialogue_requests: List[Dict[str, Any]] = [] # Stores {npc_a_id, npc_b_i
 
 # --- Global dict for NPC dialogue cooldowns ---
 npc_dialogue_cooldown_until: Dict[str, int] = {} # npc_id -> sim_min until they can chat again
-DIALOGUE_COOLDOWN_MINUTES = 20
+DIALOGUE_COOLDOWN_MINUTES = 360 # MODIFIED: Was 20, changed to 6 hours (6 * 60)
 # --- End cooldown dict ---
 
 async def process_pending_dialogues(current_sim_minutes_total: int):
+    print(f"DIALOGUE PROCESSING at tick {current_sim_minutes_total}...")
     global pending_dialogue_requests # To modify it
     if not pending_dialogue_requests:
         return
@@ -1046,26 +801,3 @@ async def _loop():
 def start_loop():
     print("Scheduler start_loop CALLED")
     asyncio.create_task(_loop())
-
-def register_ws(ws: Any):
-    _ws_clients.append(ws)
-
-def unregister_ws(ws: Any):
-    if ws in _ws_clients:
-        _ws_clients.remove(ws)
-
-# Helper function to broadcast WebSocket messages (add this at module level in scheduler.py)
-async def broadcast_ws_message(message_type: str, data: Dict):
-    typed_payload = {"type": message_type, "data": data}
-    # print(f"Broadcasting WS: {json.dumps(typed_payload)}") # Optional: for deep debugging
-    active_clients_after_send = []
-    for ws in _ws_clients:
-        if ws:
-            try: 
-                await ws.send_text(json.dumps(typed_payload))
-                active_clients_after_send.append(ws)
-            except Exception as e: 
-                print(f"Error sending WS message ({message_type}) to client {ws}: {e} - Removing client.")
-        else:
-            print(f"Found a None WebSocket object in _ws_clients during {message_type} broadcast")
-    _ws_clients[:] = active_clients_after_send

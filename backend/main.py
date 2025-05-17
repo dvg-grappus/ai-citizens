@@ -18,6 +18,7 @@ from .services import (
     supa, execute_supabase_query # Make sure these are available from services
 )
 from . import scheduler # For scheduler.start_loop()
+from backend.websocket_utils import broadcast_ws_message # ADD THIS IMPORT
 
 app = FastAPI(title='Artificial Citizens API')
 
@@ -141,16 +142,15 @@ async def reset_sim_day1_end():
         # Delete plan and reflection memories, but keep observations
         await execute_supabase_query(lambda: supa.table('memory').delete().in_('kind', ['reflect', 'plan']).execute())
         
+        # Clear current_action_id for all NPCs to prevent stale references after reset
+        await execute_supabase_query(lambda: supa.table('npc').update({'current_action_id': None}).neq('id', '00000000-0000-0000-0000-000000000000').execute())
+        
         # Log what we're preserving for clarity
         print(f"Simulation reset: Day set to {day_to_set}, SimMin set to {sim_min_to_set}")
         print("Note: Completed actions (status='done') are preserved for history")
         
-        # Optional: Force an immediate state broadcast or rely on next tick
-        if scheduler._ws_clients: # Accessing scheduler's client list
-             payload = {"type": "tick_update", "data": {'new_sim_min': sim_min_to_set, 'new_day': day_to_set}}
-             for ws in scheduler._ws_clients:
-                try: await ws.send_text(json.dumps(payload))
-                except: pass # Ignore send error on reset
+        # Optional: Force an immediate state broadcast
+        await broadcast_ws_message("tick_update", {'new_sim_min': sim_min_to_set, 'new_day': day_to_set})
 
         return {"status": "success", "message": f"Simulation time reset to Day {day_to_set}, 23:45. Completed actions are preserved for history."}
     except Exception as e:
