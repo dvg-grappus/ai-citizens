@@ -145,4 +145,4 @@ For more detailed information, please refer to:
 
 *   The simulation uses a tick-based system. The backend `scheduler.py` manages game ticks.
 *   NPC behavior is emergent based on their AI-generated plans, observations, and reflections.
-*   Extensive refactoring has been done to modularize both backend and frontend code for better maintainability. 
+*   Extensive refactoring has been done to modularize both backend and frontend code for better maintainability.
