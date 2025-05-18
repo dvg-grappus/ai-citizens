@@ -1,5 +1,7 @@
 from fastapi import FastAPI, WebSocket, HTTPException
-from fastapi.middleware.cors import CORSMiddleware # Import CORS middleware
+from fastapi.middleware.cors import CORSMiddleware  # Import CORS middleware
+from starlette.websockets import WebSocketDisconnect
+from websockets.exceptions import ConnectionClosed
 from typing import List, Optional # Added for type hinting if needed, though not in playbook snippet
 import json
 import subprocess
@@ -71,7 +73,7 @@ async def ws_endpoint(ws: WebSocket):
             await ws.receive_text()
     except Exception as e:
         # Only log critical WebSocket errors
-        if not isinstance(e, (WebSocketDisconnect := type('WebSocketDisconnect', (), {}), ConnectionClosed := type('ConnectionClosed', (), {}))):
+        if not isinstance(e, (WebSocketDisconnect, ConnectionClosed)):
             print(f"CRITICAL WebSocket error: {type(e).__name__} - {e}")
     finally:
         scheduler.unregister_ws(ws)
