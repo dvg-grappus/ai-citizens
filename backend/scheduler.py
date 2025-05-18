@@ -26,7 +26,6 @@ from .dialogue_service import (
 )
 
 settings = get_settings()
-# _ws_clients: List[Any] = [] # Renamed _ws to _ws_clients for clarity # REMOVE THIS LINE
 SIM_DAY_MINUTES = 24 * 60
 MAX_CONCURRENT_DB_OPS = 5 # Tune this value
 db_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DB_OPS)
@@ -57,15 +56,6 @@ async def get_current_sim_time_and_day() -> Dict[str, int]:
         print(f"Error fetching sim time and day: {e}")
         return {"sim_min": 0, "day": 1} # Fallback
 
-# DELETE run_daily_planning function definition (approx. lines 45-195)
-# async def run_daily_planning(current_day: int, current_sim_minutes_total: int, specific_npc_id: Optional[str] = None):
-# ... (entire function body) ...
-# import traceback; traceback.print_exc()
-
-# DELETE run_nightly_reflection function definition (approx. lines 198-312)
-# async def run_nightly_reflection(day_being_reflected: int, current_sim_minutes_total: int):
-# ... (entire function body) ...
-# await broadcast_ws_message("reflection_event", {"npc_name": npc.get('name', 'UNKNOWN'), "status": "error_reflection", "day": day_being_reflected})
 
 # --- Global list for pending dialogues ---
 # pending_dialogue_requests: List[Dict[str, Any]] = [] # Stores {npc_a_id, npc_b_id, tick}
