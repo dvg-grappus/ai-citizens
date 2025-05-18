@@ -74,7 +74,7 @@ export const useWS = () => {
                         // Handle user-generated events
                         if (eventData.event_code === 'user_event') {
                             // If the message already has an emoji at the start, use it
-                            const messageHasEmoji = /^\p{Emoji}/u.test(eventData.description);
+                            const messageHasEmoji = /^\p{Extended_Pictographic}/u.test(eventData.description);
                             emoji = messageHasEmoji ? "" : "🌐"; // Use globe emoji for user events if none present
                         }
                         
