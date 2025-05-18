@@ -12,9 +12,10 @@ logging.getLogger("fastapi").setLevel(logging.WARNING)
 logging.getLogger("uvicorn").setLevel(logging.WARNING)
 logging.getLogger("uvicorn.access").setLevel(logging.CRITICAL) # Higher level to silence completely
 
-from .models import SeedPayload, NPCUIDetailData # Relative import
+from .models import SeedPayload, NPCUIDetailData, DialogueTranscriptResponse # ADD DialogueTranscriptResponse
 from .services import (
     insert_npcs, get_state, get_npc_ui_details,
+    get_dialogue_transcript, # ADD THIS IMPORT
     supa, execute_supabase_query # Make sure these are available from services
 )
 from . import scheduler # For scheduler.start_loop()
@@ -117,6 +118,20 @@ async def get_npc_details(npc_id: str):
     if not npc_details:
         raise HTTPException(status_code=404, detail=f"NPC with ID {npc_id} not found or details unavailable")
     return npc_details
+
+@app.get("/api/v1/dialogues/{dialogue_id}/transcript", response_model=DialogueTranscriptResponse)
+async def get_full_dialogue_transcript(dialogue_id: str):
+    """Endpoint to get the full transcript of a specific dialogue session."""
+    transcript_turns = await get_dialogue_transcript(dialogue_id)
+    if transcript_turns is None: # Check for None, which indicates an error in service layer
+        raise HTTPException(status_code=500, detail=f"Error fetching transcript for dialogue ID {dialogue_id}")
+    if not transcript_turns: # Empty list means dialogue found but no turns, or dialogue not found
+        # Distinguish between dialogue not found vs dialogue with no turns based on service layer logic if needed
+        # For now, if service returns empty list, assume it means no content to show.
+        # To be more precise, get_dialogue_transcript could raise specific errors.
+        pass # Allow returning empty list of turns if dialogue existed but had no turns processed for some reason
+
+    return DialogueTranscriptResponse(dialogue_id=dialogue_id, turns=transcript_turns)
 
 @app.post("/reset_simulation_to_end_of_day1") # Changed to POST as it modifies state
 async def reset_sim_day1_end():

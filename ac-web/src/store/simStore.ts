@@ -17,7 +17,13 @@ export interface ReflectionInfo {
 export interface MemoryEvent {
     content: string;
     time?: string | null; // Timestamp for when the memory event occurred
+    sim_min?: number | null; // Simulation minute for precise sorting
     type?: string | null; // Type of memory (observation, interaction, etc.)
+    metadata?: { 
+        dialogue_id?: string; 
+        other_participant_name?: string;
+        [key: string]: any; 
+    } | null;
 }
 
 export interface NPCUIDetailData {

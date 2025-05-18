@@ -132,6 +132,34 @@ export const useWS = () => {
                         }
                     }
                 }
+                // START - New handler for social_event
+                else if (messageWrapper.type === 'social_event' && messageWrapper.data) {
+                    const eventData = messageWrapper.data;
+                    let timeStr = "";
+                    if (eventData.sim_min_of_day !== undefined) {
+                        const hours = Math.floor(eventData.sim_min_of_day / 60).toString().padStart(2, '0');
+                        const minutes = (eventData.sim_min_of_day % 60).toString().padStart(2, '0');
+                        timeStr = `${hours}:${minutes}`;
+                    }
+                    // Example: 👀 D2 05:15 Alice: Saw Bob in the Lounge.
+                    pushLog(`👀 D${eventData.day || '-'} ${timeStr} ${eventData.observer_npc_name}: ${eventData.description}`);
+                }
+                // END - New handler for social_event
+
+                // START - New handler for dialogue_event
+                else if (messageWrapper.type === 'dialogue_event' && messageWrapper.data) {
+                    const eventData = messageWrapper.data;
+                    let timeStr = "";
+                    if (eventData.sim_min_of_day !== undefined) {
+                        const hours = Math.floor(eventData.sim_min_of_day / 60).toString().padStart(2, '0');
+                        const minutes = (eventData.sim_min_of_day % 60).toString().padStart(2, '0');
+                        timeStr = `${hours}:${minutes}`;
+                    }
+                    // Example: 💬 D2 05:15 Alice (re Bob): I talked with Bob about watching shows.
+                    pushLog(`💬 D${eventData.day || '-'} ${timeStr} ${eventData.npc_name} (re ${eventData.other_participant_name}): ${eventData.summary}`);
+                }
+                // END - New handler for dialogue_event
+
             } catch (e) {
                 console.error('Error handling WebSocket message');
                 pushLog('Received malformed data from server.');

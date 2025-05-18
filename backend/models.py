@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import List, Optional, Dict # Ensure these are imported
+from typing import List, Optional, Dict, Any # Ensure these are imported
 
 class Position(BaseModel):
     x: int
@@ -30,7 +30,8 @@ class ReflectionInfo(BaseModel):
 class MemoryEvent(BaseModel):
     content: str
     time: Optional[str] = None
-    type: Optional[str] = None
+    type: Optional[str] = None # This is 'kind' from DB
+    metadata: Optional[Dict[str, Any]] = None # ADDED metadata field
 
 class NPCUIDetailData(BaseModel):
     npc_id: str
@@ -43,3 +44,15 @@ class NPCUIDetailData(BaseModel):
     current_plan_summary: List[str] = []
     memory_stream: List[MemoryEvent] = []
 # --- END ADDED MODELS ---
+
+# --- ADDING MODELS FOR DIALOGUE TRANSCRIPT ---
+class DialogueTurnResponse(BaseModel):
+    speaker_name: str
+    text: str
+    sim_min_of_turn: int # Original sim_min for sorting/reference
+    timestamp_str: str # Formatted time string for display
+
+class DialogueTranscriptResponse(BaseModel):
+    dialogue_id: str
+    turns: List[DialogueTurnResponse]
+# --- END DIALOGUE TRANSCRIPT MODELS ---

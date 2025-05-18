@@ -167,7 +167,7 @@ async def run_nightly_reflection(day_being_reflected: int, current_sim_minutes_t
             reflection_query_text = f"Key events and main thoughts for {npc_name} on {sim_date_str}? What are 1-3 most salient high-level questions I can answer about my experiences today?"
             retrieved_memories_str = await retrieve_memories(npc_id, reflection_query_text, "reflection", current_sim_minutes_total)
             
-            system_prompt = REFLECTION_SYSTEM_PROMPT_TEMPLATE.format(name=npc_name, sim_date=sim_date_str)
+            system_prompt = REFLECTION_SYSTEM_PROMPT_TEMPLATE.format(npc_name=npc_name, sim_date=sim_date_str)
             user_prompt = REFLECTION_USER_PROMPT_TEMPLATE.format(traits_summary=npc_traits_summary, retrieved_memories=retrieved_memories_str)
             
             raw_reflection_text = call_llm(system_prompt, user_prompt, max_tokens=500, model="gpt-4o") # Increased max_tokens for richer reflection

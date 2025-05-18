@@ -4,8 +4,10 @@ import {
     sectionTitleStyles,
     listItemStyles,
     tagStyles,
-    filterButtonStyles
+    filterButtonStyles,
+    viewTranscriptButtonStyles
 } from '../NPCDetailModal.styles'; // Adjust path for styles
+import DialogueTranscriptModal from './DialogueTranscriptModal';
 
 interface MemoryStreamTabProps {
     memoryStream: MemoryEvent[];
@@ -15,6 +17,7 @@ interface MemoryStreamTabProps {
 const getMemoryType = (memory: MemoryEvent): string => {
     if (memory.type === 'reflect') return 'reflect';
     if (memory.type === 'plan') return 'plan';
+    if (memory.type === 'dialogue_summary') return 'dialogue_summary';
     if (memory.type === 'obs') {
         const content = memory.content || '';
         if (content.includes('[Social]')) return 'social';
@@ -38,19 +41,28 @@ const cleanMemoryContent = (content: string): string => {
 
 const MemoryStreamTab: React.FC<MemoryStreamTabProps> = ({ memoryStream }) => {
     const [activeFilter, setActiveFilter] = useState('all');
+    const [isTranscriptModalOpen, setIsTranscriptModalOpen] = useState(false);
+    const [selectedDialogueId, setSelectedDialogueId] = useState<string | null>(null);
 
     const filteredMemoryStream = useMemo(() => {
         if (!memoryStream) return [];
+        const sortedStream = [...memoryStream].sort((a, b) => (b.sim_min || 0) - (a.sim_min || 0));
+
         if (activeFilter === 'all') {
-            return memoryStream;
+            return sortedStream;
         }
-        return memoryStream.filter(memory => {
+        return sortedStream.filter(memory => {
             const type = getMemoryType(memory);
             return type === activeFilter;
         });
     }, [memoryStream, activeFilter]);
 
-    const filterTypes = ['all', 'social', 'environment', 'periodic', 'dialogue', 'reflect', 'plan', 'other'];
+    const filterTypes = ['all', 'social', 'environment', 'periodic', 'dialogue_summary', 'reflect', 'plan', 'other'];
+
+    const handleViewTranscript = (dialogueId: string) => {
+        setSelectedDialogueId(dialogueId);
+        setIsTranscriptModalOpen(true);
+    };
 
     return (
         <>
@@ -78,7 +90,7 @@ const MemoryStreamTab: React.FC<MemoryStreamTabProps> = ({ memoryStream }) => {
                             onClick={() => setActiveFilter(filterType)}
                             style={buttonStyle}
                         >
-                            {filterType.charAt(0).toUpperCase() + filterType.slice(1)}
+                            {filterType === 'dialogue_summary' ? 'Dialogue' : filterType.charAt(0).toUpperCase() + filterType.slice(1)}
                         </button>
                     );
                 })}
@@ -89,6 +101,7 @@ const MemoryStreamTab: React.FC<MemoryStreamTabProps> = ({ memoryStream }) => {
                     {filteredMemoryStream.map((memory, index) => {
                         const memoryType = getMemoryType(memory);
                         const cleanContent = cleanMemoryContent(memory.content);
+                        console.log('[MemoryStreamTab] Rendering memory item:', memory);
 
                         return (
                             <div key={index} style={{ marginBottom: '12px', borderBottom: index < filteredMemoryStream.length - 1 ? '1px solid #444' : 'none', paddingBottom: '8px' }}>
@@ -97,9 +110,9 @@ const MemoryStreamTab: React.FC<MemoryStreamTabProps> = ({ memoryStream }) => {
                                         {memory.time || 'Unknown time'}
                                     </div>
                                     <div>
-                                        {memoryType === 'reflect' || memoryType === 'plan' ? (
-                                            <span style={tagStyles[memoryType]}>
-                                                {memoryType.charAt(0).toUpperCase() + memoryType.slice(1)}
+                                        {memoryType === 'reflect' || memoryType === 'plan' || memoryType === 'dialogue_summary' ? (
+                                            <span style={tagStyles[memoryType as keyof typeof tagStyles] || tagStyles.other}>
+                                                {memoryType === 'dialogue_summary' ? 'Dialogue' : memoryType.charAt(0).toUpperCase() + memoryType.slice(1)}
                                             </span>
                                         ) : (
                                             <>
@@ -114,12 +127,27 @@ const MemoryStreamTab: React.FC<MemoryStreamTabProps> = ({ memoryStream }) => {
                                     </div>
                                 </div>
                                 <div style={{...listItemStyles, whiteSpace: 'pre-wrap'}}>{cleanContent}</div>
+                                {memory.type === 'dialogue_summary' && memory.metadata?.dialogue_id && (
+                                    <button 
+                                        onClick={() => handleViewTranscript(memory.metadata!.dialogue_id!)}
+                                        style={viewTranscriptButtonStyles}
+                                    >
+                                        View Transcript
+                                    </button>
+                                )}
                             </div>
                         );
                     })}
                 </div>
             ) : (
                 <p style={listItemStyles}>No memory events available or all types filtered out.</p>
+            )}
+            {selectedDialogueId && (
+                <DialogueTranscriptModal 
+                    isOpen={isTranscriptModalOpen} 
+                    onClose={() => setIsTranscriptModalOpen(false)}
+                    dialogueId={selectedDialogueId}
+                />
             )}
         </>
     );

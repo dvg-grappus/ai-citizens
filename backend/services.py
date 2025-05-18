@@ -148,7 +148,7 @@ def insert_npcs(npcs_data: list):
     return None
 
 async def get_npc_ui_details(npc_id_to_fetch: str, current_day_from_env: int) -> Optional[NPCUIDetailData]:
-    print(f"Fetching UI details for NPC: {npc_id_to_fetch}, Current Day: {current_day_from_env}")
+    # print(f"Fetching UI details for NPC: {npc_id_to_fetch}, Current Day: {current_day_from_env}") # REMOVED THIS LOG
     try:
         # First check if the NPC exists
         npc_info_res = await execute_supabase_query(lambda: supa.table('npc').select('id, name').eq('id', npc_id_to_fetch).maybe_single().execute())
@@ -268,7 +268,7 @@ async def get_npc_ui_details(npc_id_to_fetch: str, current_day_from_env: int) ->
         
         # Fetch up to 50 most recent memories of all types
         all_recent_memories_res = await execute_supabase_query(lambda: supa.table('memory')
-            .select('content, sim_min, kind')
+            .select('content, sim_min, kind, metadata')
             .eq('npc_id', npc_id_to_fetch)
             .order('sim_min', desc=True)
             .limit(50)
@@ -280,6 +280,7 @@ async def get_npc_ui_details(npc_id_to_fetch: str, current_day_from_env: int) ->
                 content = memory.get('content', '')
                 sim_min = memory.get('sim_min')
                 mem_kind = memory.get('kind', 'unknown')
+                mem_metadata = memory.get('metadata')
                 
                 time_str = ""
                 if sim_min is not None:
@@ -293,7 +294,9 @@ async def get_npc_ui_details(npc_id_to_fetch: str, current_day_from_env: int) ->
                 memory_stream_list.append(MemoryEvent(
                     content=content,
                     time=time_str,
-                    type=mem_kind
+                    sim_min=sim_min,
+                    type=mem_kind,
+                    metadata=mem_metadata
                 ))
                 
                 # Populate reflections_list (up to 5) and latest_reflection_str
@@ -319,6 +322,53 @@ async def get_npc_ui_details(npc_id_to_fetch: str, current_day_from_env: int) ->
         )
     except Exception as e:
         print(f"Error in get_npc_ui_details for {npc_id_to_fetch}: {e}")
+        import traceback; traceback.print_exc()
+        return None
+
+async def get_dialogue_transcript(dialogue_id_str: str) -> Optional[List[Dict]]:
+    """Fetches all turns for a given dialogue_id, along with speaker names."""
+    try:
+        turns_res = await execute_supabase_query(
+            lambda: supa.table('dialogue_turn')
+            .select('text, sim_min, speaker_id, npc:speaker_id ( name )' ) # Fetch speaker's name via relationship
+            .eq('dialogue_id', dialogue_id_str)
+            .order('sim_min', desc=False) # Order turns chronologically
+            .execute()
+        )
+
+        if not (turns_res and turns_res.data):
+            print(f"No turns found for dialogue_id: {dialogue_id_str}")
+            return [] # Return empty list if no turns
+
+        formatted_turns = []
+        for turn_data in turns_res.data:
+            speaker_name = "Unknown"
+            # The foreign table join with Supabase Python client might nest the speaker name
+            if turn_data.get('npc') and isinstance(turn_data['npc'], dict):
+                speaker_name = turn_data['npc'].get('name', "Unknown")
+            elif turn_data.get('speaker_id'): # Fallback if join didn't populate as expected
+                # This would require another query per turn, less efficient.
+                # The join 'npc:speaker_id ( name )' should handle this.
+                # For now, rely on the join.
+                pass
+            
+            sim_min = turn_data.get('sim_min', 0)
+            day_num = sim_min // 1440 + 1
+            min_of_day = sim_min % 1440
+            hour = min_of_day // 60
+            minute = min_of_day % 60
+            timestamp_str = f"Day {day_num}, {hour:02d}:{minute:02d}"
+
+            formatted_turns.append({
+                "speaker_name": speaker_name,
+                "text": turn_data.get('text', ""),
+                "sim_min_of_turn": sim_min,
+                "timestamp_str": timestamp_str
+            })
+        
+        return formatted_turns
+    except Exception as e:
+        print(f"Error in get_dialogue_transcript for {dialogue_id_str}: {e}")
         import traceback; traceback.print_exc()
         return None
 

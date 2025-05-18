@@ -19,7 +19,11 @@ from .memory_service import retrieve_memories, get_embedding, save_memory_batch,
 from .services import supa, execute_supabase_query, get_npc_by_id, save_npc, get_object_by_id, get_area_details, update_npc_current_action
 from .websocket_utils import register_ws, unregister_ws, broadcast_ws_message
 from .planning_and_reflection import run_daily_planning, run_nightly_reflection
-from .dialogue_service import process_pending_dialogues as process_dialogues_ext, add_pending_dialogue_request as add_dialogue_request_ext
+from .dialogue_service import (
+    process_pending_dialogues as process_dialogues_ext, 
+    add_pending_dialogue_request as add_dialogue_request_ext,
+    are_npcs_on_cooldown # IMPORTED new function
+)
 
 settings = get_settings()
 # _ws_clients: List[Any] = [] # Renamed _ws to _ws_clients for clarity # REMOVE THIS LINE
@@ -148,15 +152,15 @@ async def update_npc_actions_and_state(all_npcs_data: List[Dict], current_sim_mi
                         effective_movable_height = EXPECTED_AREA_HEIGHT - 2 * MOVEMENT_AREA_MARGIN
 
                         if effective_movable_width < 1 or effective_movable_height < 1:
-                            action_target_x = EXPECTED_AREA_WIDTH / 2
-                            action_target_y = EXPECTED_AREA_HEIGHT / 2
+                            wander_target_x = EXPECTED_AREA_WIDTH / 2
+                            wander_target_y = EXPECTED_AREA_HEIGHT / 2
                         else:
-                            action_target_x = random.uniform(MOVEMENT_AREA_MARGIN, EXPECTED_AREA_WIDTH - MOVEMENT_AREA_MARGIN)
-                            action_target_y = random.uniform(MOVEMENT_AREA_MARGIN, EXPECTED_AREA_HEIGHT - MOVEMENT_AREA_MARGIN)
+                            wander_target_x = random.uniform(MOVEMENT_AREA_MARGIN, EXPECTED_AREA_WIDTH - MOVEMENT_AREA_MARGIN)
+                            wander_target_y = random.uniform(MOVEMENT_AREA_MARGIN, EXPECTED_AREA_HEIGHT - MOVEMENT_AREA_MARGIN)
                         
                         action_position_payload = {
-                            'x': action_target_x, 
-                            'y': action_target_y, 
+                            'x': wander_target_x, 
+                            'y': wander_target_y, 
                             'areaId': target_area_id_for_action # Use areaId from object
                         }
                         npc_update_payload['spawn'] = action_position_payload
@@ -171,7 +175,7 @@ async def update_npc_actions_and_state(all_npcs_data: List[Dict], current_sim_mi
                     current_position_data = npc_update_payload['spawn'] # Update local state
                     after_area_id = current_position_data.get('areaId')
                     if before_area_id != after_area_id and before_area_id is not None and after_area_id is not None:
-                        await create_area_change_observations(npc_id, npc_name, before_area_id, after_area_id, all_npcs_data, current_sim_minutes_total)
+                        await create_area_change_observations(npc_id, npc_name, before_area_id, after_area_id, all_npcs_data, current_sim_minutes_total, actual_current_day)
                 
                 await broadcast_ws_message("action_start", {"npc_name": npc_name, "action_title": action_title_log, "emoji": action_emoji_log, "sim_time": new_sim_min_of_day, "day": actual_current_day})
             else: # No next action to start
@@ -231,13 +235,16 @@ async def update_npc_actions_and_state(all_npcs_data: List[Dict], current_sim_mi
 
 
 # Helper function to generate observations for NPC area changes
-async def create_area_change_observations(moving_npc_id, moving_npc_name, from_area_id, to_area_id, all_npcs_data, current_sim_minutes_total):
-    """Create observation memories when NPCs change areas or notice others in their area."""
+async def create_area_change_observations(moving_npc_id, moving_npc_name, from_area_id, to_area_id, all_npcs_data, current_sim_minutes_total, actual_current_day):
+    """Create observation memories when NPCs change areas or notice others in their area.
+    Also broadcasts WebSocket messages for these social events."""
     try:
         # Get area names for better descriptions
         from_area_name = "an area"
         to_area_name = "an area"
         
+        sim_min_of_day = current_sim_minutes_total % SIM_DAY_MINUTES
+
         area_res_from = await execute_supabase_query(lambda: supa.table('area').select('name').eq('id', from_area_id).maybe_single().execute())
         if area_res_from and area_res_from.data:
             from_area_name = area_res_from.data.get('name', "an area")
@@ -246,93 +253,104 @@ async def create_area_change_observations(moving_npc_id, moving_npc_name, from_a
         if area_res_to and area_res_to.data:
             to_area_name = area_res_to.data.get('name', "an area")
         
-        # We no longer create self-movement observations
-        # The moving NPC doesn't need to log "I moved from X to Y"
-        
-        # Instead, just find NPCs already in the destination area and create memories for both parties
+        # Part 1: Observations related to the NEW area (to_area_id)
         npcs_in_new_area = [
             npc for npc in all_npcs_data 
-            if npc.get('spawn', {}).get('area_id') == to_area_id and npc['id'] != moving_npc_id
+            if npc.get('spawn', {}).get('areaId') == to_area_id and npc['id'] != moving_npc_id
         ]
 
-        if not npcs_in_new_area:
-            return
+        if npcs_in_new_area:
+            moving_npc_data_list = [n for n in all_npcs_data if n['id'] == moving_npc_id] # Use list comp for safety
+            if moving_npc_data_list: # Ensure moving_npc_data is found
+                moving_npc_data = moving_npc_data_list[0]
+                for other_npc_in_new_area in npcs_in_new_area:
+                    # Create observation for the moving NPC noticing someone already in the new area
+                    moving_sees_other_obs = f"[Social] I saw {other_npc_in_new_area['name']} in the {to_area_name}."
+                    moving_sees_other_embedding = await get_embedding(moving_sees_other_obs)
+                    if moving_sees_other_embedding:
+                        mem_payload_mover = {
+                            'npc_id': moving_npc_id, 
+                            'sim_min': current_sim_minutes_total, 
+                            'kind': 'obs', 
+                            'content': moving_sees_other_obs, 
+                            'importance': 2, 
+                            'embedding': moving_sees_other_embedding
+                        }
+                        db_response_mover = await execute_supabase_query(lambda: supa.table('memory').insert(mem_payload_mover).execute())
+                        if db_response_mover.data:
+                            await broadcast_ws_message("social_event", {
+                                "observer_npc_id": moving_npc_id,
+                                "observer_npc_name": moving_npc_name,
+                                "event_type": "saw_other_in_new_area",
+                                "target_npc_name": other_npc_in_new_area['name'],
+                                "area_name": to_area_name,
+                                "description": moving_sees_other_obs,
+                                "sim_min_of_day": sim_min_of_day,
+                                "day": actual_current_day
+                            })
+                    
+                    # Create observation for the other NPC (already in new area) noticing the moving NPC enter
+                    other_sees_moving_enter_obs = f"[Social] I saw {moving_npc_name} enter the {to_area_name}."
+                    other_sees_moving_enter_embedding = await get_embedding(other_sees_moving_enter_obs)
+                    if other_sees_moving_enter_embedding:
+                        mem_payload_other = {
+                            'npc_id': other_npc_in_new_area['id'], 
+                            'sim_min': current_sim_minutes_total, 
+                            'kind': 'obs', 
+                            'content': other_sees_moving_enter_obs, 
+                            'importance': 2, 
+                            'embedding': other_sees_moving_enter_embedding
+                        }
+                        db_response_other = await execute_supabase_query(lambda: supa.table('memory').insert(mem_payload_other).execute())
+                        if db_response_other.data:
+                             await broadcast_ws_message("social_event", {
+                                "observer_npc_id": other_npc_in_new_area['id'],
+                                "observer_npc_name": other_npc_in_new_area['name'],
+                                "event_type": "other_saw_me_enter", # From perspective of observer
+                                "target_npc_name": moving_npc_name,
+                                "area_name": to_area_name,
+                                "description": other_sees_moving_enter_obs,
+                                "sim_min_of_day": sim_min_of_day,
+                                "day": actual_current_day
+                            })
 
-        moving_npc_data = next((n for n in all_npcs_data if n['id'] == moving_npc_id), None)
-        if not moving_npc_data: return
-
-        for other_npc in npcs_in_new_area:
-            # Don't trigger dialogue with self or if one of them is already in an active dialogue.
-            # This check might need refinement if `is_in_dialogue` is not a reliable real-time field.
-            # Or if current_action indicates something that shouldn't be interrupted.
-            if other_npc['id'] == moving_npc_id: # Should be caught by the list comprehension, but double check
-                continue
-
-            # Check if either NPC is currently in an active dialogue already (hypothetical field or check)
-            # if moving_npc_data.get('is_in_dialogue') or other_npc.get('is_in_dialogue'):
-            #     print(f"DEBUG: Skipping encounter between {moving_npc_name} and {other_npc['name']} as one is busy.")
-            #     continue
-            
-            # Simple proximity trigger: if they are in the same area.
-            trigger_event_desc = f"{moving_npc_name} and {other_npc['name']} encountered each other in {other_npc.get('spawn',{}).get('area_name', 'unknown area')}."
-            print(f"ENCOUNTER: {trigger_event_desc}")
-            
-            # Add to pending dialogue requests - USE THE IMPORTED FUNCTION
-            add_dialogue_request_ext(
-                npc_a_id=moving_npc_id,
-                npc_b_id=other_npc['id'],
-                npc_a_name=moving_npc_name,
-                npc_b_name=other_npc['name'],
-                npc_a_traits=[trait.strip() for trait in str(moving_npc_data.get('personality', '')).split(',') if trait.strip()],
-                npc_b_traits=[trait.strip() for trait in str(other_npc.get('personality', '')).split(',') if trait.strip()],
-                trigger_event=trigger_event_desc,
-                current_tick=current_sim_minutes_total # Use current_sim_minutes_total as the tick
-            )
-            # Example of creating an observation for the encounter itself, if not done by dialogue system
-            # encounter_obs_text = f"You encountered {other_npc['name']} in {other_npc.get('spawn',{}).get('area_name', 'unknown area')}."
-            # encounter_embedding = await get_embedding(encounter_obs_text)
-            # if encounter_embedding:
-            #     await execute_supabase_query(lambda: supa.table('memory').insert({
-            #         'npc_id': moving_npc_id, 'sim_min': current_sim_minutes_total, 'kind': 'obs', 
-            #         'content': encounter_obs_text, 'importance': 1, 'embedding': encounter_embedding
-            #     }).execute())
-
-        # Observation for NPCs in the 'from_area' that the moving_npc left
+        # Part 2: Observations related to the OLD area (from_area_id)
         npcs_in_old_area = [
             npc for npc in all_npcs_data 
-            if npc.get('spawn', {}).get('area_id') == from_area_id and npc['id'] != moving_npc_id
+            if npc.get('spawn', {}).get('areaId') == from_area_id and npc['id'] != moving_npc_id
         ]
 
-        for other_npc in npcs_in_old_area:
-            # Create observation for the moving NPC noticing someone in the new area
-            moving_sees_other_obs = f"[Social] I saw {other_npc['name']} in the {to_area_name}."
-            moving_sees_other_embedding = await get_embedding(moving_sees_other_obs)
-            if moving_sees_other_embedding:
+        for other_npc_in_old_area in npcs_in_old_area:
+            # Create observation for the other NPC (in old area) noticing the moving NPC leave
+            other_sees_moving_leave_obs = f"[Social] I saw {moving_npc_name} leave the {from_area_name}."
+            other_sees_moving_leave_embedding = await get_embedding(other_sees_moving_leave_obs)
+            if other_sees_moving_leave_embedding:
                 mem_payload = {
-                    'npc_id': moving_npc_id, 
+                    'npc_id': other_npc_in_old_area['id'], 
                     'sim_min': current_sim_minutes_total, 
                     'kind': 'obs', 
-                    'content': moving_sees_other_obs, 
+                    'content': other_sees_moving_leave_obs, 
                     'importance': 2, 
-                    'embedding': moving_sees_other_embedding
+                    'embedding': other_sees_moving_leave_embedding
                 }
-                await execute_supabase_query(lambda: supa.table('memory').insert(mem_payload).execute())
+                db_response_leave = await execute_supabase_query(lambda: supa.table('memory').insert(mem_payload).execute())
+                if db_response_leave.data:
+                    await broadcast_ws_message("social_event", {
+                        "observer_npc_id": other_npc_in_old_area['id'],
+                        "observer_npc_name": other_npc_in_old_area['name'],
+                        "event_type": "other_saw_me_leave", # From perspective of observer
+                        "target_npc_name": moving_npc_name,
+                        "area_name": from_area_name,
+                        "description": other_sees_moving_leave_obs,
+                        "sim_min_of_day": sim_min_of_day,
+                        "day": actual_current_day
+                    })
             
-            # Create observation for the other NPC noticing the moving NPC
-            other_sees_moving_obs = f"[Social] I saw {moving_npc_name} enter the {to_area_name}."
-            other_sees_moving_embedding = await get_embedding(other_sees_moving_obs)
-            if other_sees_moving_embedding:
-                mem_payload = {
-                    'npc_id': other_npc['id'], 
-                    'sim_min': current_sim_minutes_total, 
-                    'kind': 'obs', 
-                    'content': other_sees_moving_obs, 
-                    'importance': 2, 
-                    'embedding': other_sees_moving_embedding
-                }
-                await execute_supabase_query(lambda: supa.table('memory').insert(mem_payload).execute())
+            # The moving NPC does not create an observation about NPCs in the area they just left in this context.
+            # If desired, a separate "looking back" observation could be made by the mover, but that's new logic.
+
     except Exception as e:
-        print(f"Error creating area change observations: {e}")
+        print(f"Error creating area change observations or broadcasting: {e}") # Updated log
         # Don't raise the exception further as this is non-critical functionality
 
 # Modify advance_tick to pass all_areas_data to update_npc_actions_and_state
@@ -370,6 +388,75 @@ async def advance_tick():
         all_areas_data_for_tick = all_areas_res.data or []
 
         await update_npc_actions_and_state(all_npcs_data, current_sim_minutes_total, actual_current_day, new_sim_min_of_day, all_areas_data_for_tick)
+
+        # --- Start Dialogue Encounter Detection & Initiation ---
+        # Check for NPC encounters to initiate dialogues
+        # Make sure all_npcs_data is current after update_npc_actions_and_state might have changed positions
+        # Re-fetch might be too slow, assume all_npcs_data passed to update_npc_actions_and_state is sufficient
+        # OR, update_npc_actions_and_state should return the modified all_npcs_data if positions changed.
+        # For now, we'll use the all_npcs_data fetched at the start of the tick. This might mean
+        # a dialogue is initiated based on positions *before* the wander/action movement of this tick.
+        # This is a potential refinement area if dialogues seem to trigger for NPCs that just moved apart.
+
+        if len(all_npcs_data) >= 2:
+            # print(f"[DialogueCheck] Tick {current_sim_minutes_total}: Evaluating {len(all_npcs_data)} NPCs for dialogue.") # REMOVED THIS LOG
+            # Randomly select two different NPCs
+            npc1_data, npc2_data = random.sample(all_npcs_data, 2)
+
+            npc1_id = npc1_data['id']
+            npc1_name = npc1_data.get('name', 'NPC1')
+            npc1_pos_data = npc1_data.get('spawn', {})
+            npc1_area_id = npc1_pos_data.get('areaId')
+
+            npc2_id = npc2_data['id']
+            npc2_name = npc2_data.get('name', 'NPC2')
+            npc2_pos_data = npc2_data.get('spawn', {})
+            npc2_area_id = npc2_pos_data.get('areaId')
+
+            if npc1_area_id == npc2_area_id:
+                # print(f"[DialogueCheck] NPCs {npc1_name} and {npc2_name} are in the same area: {npc1_area_id}.") # Too verbose
+                distance = math.sqrt((npc1_pos_data['x'] - npc2_pos_data['x'])**2 + (npc1_pos_data['y'] - npc2_pos_data['y'])**2)
+                
+                if distance < 10000: # Effectively same-area check now
+                    # print(f"[DialogueCheck] NPCs {npc1_name} and {npc2_name} are close enough (dist: {distance:.2f} < 10000).") # Too verbose
+                    
+                    # ---- START NEW COOLDOWN CHECK from dialogue_service ----
+                    if await are_npcs_on_cooldown(npc1_id, npc2_id, current_sim_minutes_total):
+                        # print(f"[DialogueCheck] NPCs {npc1_name} & {npc2_name} on cooldown (checked by scheduler). Skipping further checks.") # Optional: verbose log
+                        return # Skip to next pair if on cooldown
+                    # ---- END NEW COOLDOWN CHECK ----
+
+                    if random.random() < 0.50: 
+                        print(f"[DialogueCheck] SUCCESS: Random chance (50%) passed for {npc1_name} and {npc2_name}. Adding dialogue request.")
+                        
+                        # Prepare additional arguments for add_pending_dialogue_request
+                        npc1_traits = npc1_data.get('traits', [])
+                        npc2_traits = npc2_data.get('traits', [])
+                        area_name_for_trigger = "their current area" # Placeholder, ideally fetch area name
+                        if npc1_area_id: # Try to get a more specific area name
+                            area_details = await get_area_details(npc1_area_id) # Assuming get_area_details can fetch by ID
+                            if area_details and area_details.get('name'):
+                                area_name_for_trigger = area_details.get('name')
+
+                        trigger_event = f"saw {npc2_name} in {area_name_for_trigger}" # From NPC1's perspective
+                        
+                        await add_dialogue_request_ext(
+                            npc_a_id=npc1_id, 
+                            npc_b_id=npc2_id, 
+                            npc_a_name=npc1_name, 
+                            npc_b_name=npc2_name,
+                            npc_a_traits=npc1_traits,
+                            npc_b_traits=npc2_traits,
+                            trigger_event=trigger_event,
+                            current_tick=current_sim_minutes_total
+                        )
+                    else:
+                        print(f"[DialogueCheck] FAILED: Random chance (50%) for {npc1_name} and {npc2_name}.")
+                else:
+                    print(f"[DialogueCheck] FAILED: NPCs {npc1_name} and {npc2_name} are too far apart (dist: {distance:.2f}).")
+            # else:
+                # print(f"[DialogueCheck] NPCs {npc1_name} and {npc2_name} are in different areas.")
+        # --- End Dialogue Encounter Detection & Initiation ---
 
         # Process pending dialogues using the external service
         npcs_to_replan_after_dialogue = await process_dialogues_ext(current_sim_minutes_total)

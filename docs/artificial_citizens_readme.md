@@ -4,42 +4,45 @@
 
 Artificial Citizens is a micro‑scale agent simulator: a living sandbox where every dot on the canvas is an LLM‑driven resident with needs, quirks, memories, and a daily plan. The goal of this proof‑of‑concept is to show how believable behaviour can emerge from simple building blocks in a single weekend hack.
 
-### Why it’s interesting
+### Why it's interesting
 
 * **LLM‑powered cognition** — planning, reflection, dialogue all come from GPT.
-* **Vectorised episodic memory** — agents recall the right facts without context bloat.
+* **Vectorised episodic memory** — agents recall the right facts without context bloat using pgvector.
 * **Realtime reactivity** — random events or NPC encounters rewrite the day on the fly.
-* **Visual heartbeat** — one glance at the canvas shows who’s sleeping, chatting, or panicking.
+* **Visual heartbeat** — one glance at the canvas shows who's sleeping, chatting, or panicking.
 
 ### Core Mechanics
 
-1. **World Clock** – 1 real second = 5 sim‑minutes. A top‑right HUD shows *Day N – HH\:MM*.
-2. **Areas & Objects** – Four starter zones (Bedroom · Office · Bathroom · Lounge) populated with stateful objects (Bed, PC, Coffee Machine, etc.).
+1. **World Clock** – 1 real second = configurable sim‑minutes (e.g., 5 min). A top‑right HUD shows *Day N – HH:MM*.
+2. **Areas & Objects** – Four starter zones (Bedroom · Office · Bathroom · Lounge) populated with stateful objects (Bed, PC, Toothbrush, etc.). NPCs move within an area's expected full local coordinate space (e.g., 400x300 units), respecting a configurable margin.
 3. **NPC DNA**
 
    * Backstory & personality tags (friendly, lazy…)
-   * Relationships map (friend, rival)
-   * Spawn position & default routine (array of `ActionDef` IDs)
-4. **Action System** – Each `ActionDef` has emoji, base duration, pre‑conditions, post‑effects.
+   * Relationships map (friend, rival) - *Currently conceptual, not fully implemented in interactions.*
+   * Spawn position (`x`, `y`, `areaId`).
+   * `wander_probability` (float, 0.0-1.0) determining chance to make a random move within their current area each tick.
+4. **Action System** – Each `ActionDef` has emoji, base duration, pre‑conditions, post‑effects. Actions are managed as `ActionInstance` records.
 5. **Memory Stream** – Continuous append‑only log of:
 
-   * **Plan** — daily schedule created at 00:00
-   * **Observation** — timestamped events (“08:15 — Saw Bob enter Lounge”)
-   * **Reflection** — nightly 3‑line digest with importance scores
-6. **Retrieval Scoring** – `score = 0.2·Recency + 0.4·Importance + 0.4·Similarity` (weights vary by query type) → top‑20 memories feed the next prompt.
-7. **Encounter Loop**
-
-   * Proximity check (<30 px or same area) triggers an *Encounter* record.
-   * Agent decides to greet / ignore / flee.
-   * Optional dialogue: 3–5 GPT‑generated turns; both agents may re‑plan after.
-8. **Random Challenges** – 5 % chance per tick of a global event (fire alarm, pizza drop). Agents can abandon current action if priority is higher.
+   * **Plan** — daily schedule created around 5 AM.
+   * **Observation** — timestamped events (“08:15 — Saw Bob enter Lounge”) including dialogue lines.
+   * **Reflection** — nightly 3‑line digest with importance scores.
+   * Embeddings for memories are stored directly in the `memory` table using `pgvector`.
+6. **Retrieval Scoring** – `score = w_recency * Recency + w_importance * Importance + w_similarity * Similarity` (weights vary by query type: planning, reflection, dialogue) → top‑20 memories feed the next prompt.
+7. **Encounter & Dialogue System**
+   * NPCs changing areas or being in the same area can trigger an *Encounter*.
+   * Encounters lead to pending dialogue requests processed by a dedicated `dialogue_service`.
+   * Dialogues are GPT‑generated (3-5 turns), and each turn is logged as an observation memory.
+   * NPCs may re‑plan their day after a dialogue.
+8. **Random Challenges** – Configurable probability per tick of a global event (fire alarm, pizza drop). Agents can abandon current action if priority is higher.
 
 ### Front‑of‑House (UI)
 
-* **Canvas Stage** – black background, white‑lined quadrants; coloured dots with floating emoji.
+* **Canvas Stage** – black background, four named quadrants; coloured NPC dots with floating emoji, animated movement.
 * **Clock Overlay** – always‑visible day & time counter.
-* **Controls Panel** – pause, resume, speed slider, spawn new NPC.
-* **Log Panel** – autoscroll feed of observations & challenges.
+* **Controls Panel** – *Currently conceptual, manual tick via API endpoint if needed.*
+* **Log Panel** – *Currently basic client-side logging; backend events/dialogues can be observed via WebSocket messages or database.*
+* **NPC Detail Modal** - Click an NPC to see their recent actions, plans, reflections, and memory stream.
 
 ---
 
@@ -49,168 +52,187 @@ A weekend‑scale proof‑of‑concept that demonstrates personality‑driven ag
 
 ## 2. Tech Stack (MVP)
 
-| Layer           | Choice                              | Rationale                                    |
-| --------------- | ----------------------------------- | -------------------------------------------- |
-| Frontend        | **React + Vite + Zustand**          | Fast boot‑up, global state simple to manage. |
-| Canvas / Render | **Konva** (2‑D canvas lib)          | Lightweight for dot‑style animation.         |
-| Backend         | **FastAPI (Python)**                | Async endpoints, easy LLM / vector hooks.    |
-| LLM             | **OpenAI GPT‑4o**                   | Planning, reflection, dialogue.              |
-| Embeddings      | **OpenAI `text-embedding-3‑small`** | Memory vector search.                        |
-| Vector Store    | **SQLite + Chroma-lite**            | Zero‑infra local vector DB.                  |
-| Realtime        | **Socket.IO**                       | Push tick events to client.                  |
-| Build/Deploy    | **Docker compose**                  | One command, portable.                       |
+| Layer           | Choice                              | Rationale                                       |
+| --------------- | ----------------------------------- | ----------------------------------------------- |
+| Frontend        | **React + Vite + Zustand**          | Fast boot‑up, global state simple to manage.    |
+| Canvas / Render | **Konva** (2‑D canvas lib)          | Lightweight for dot‑style animation.            |
+| Backend         | **FastAPI (Python)**                | Async endpoints, easy LLM / vector hooks.       |
+| LLM             | **OpenAI GPT‑4o (or similar)**      | Planning, reflection, dialogue.                 |
+| Embeddings      | **OpenAI `text-embedding-3‑small`** | Memory vector search.                           |
+| Vector Store    | **Supabase (pgvector extension)**   | Integrated vector DB with PostgreSQL.           |
+| Realtime        | **FastAPI WebSockets**              | Push tick events and other updates to client.   |
+| Build/Deploy    | **Local (uvicorn + pnpm dev)**      | Docker Compose planned for future portability.  |
 
 ## 3. High‑Level Flow
 
-1. **Init → /seed**: POST JSON describing areas, objects, NPC list.
-2. **Sim Loop (server)**: every real second → 5 sim‑minutes.
-3. **NPC cycle** (per tick):
-
-   1. *Observe* env + encounters.
-   2. *React* (maybe) -> action queue.
-   3. *Execute* next action step.
-   4. *Log* observation to Memory Stream.
-4. **Daily cron (sim‑midnight)**: Plan + Reflect prompts run; reflections appended.
-5. **Client** subscribes to `/tick` socket → redraw dots & emojis.
+1.  **Seed Data (Optional/Initial Setup)**: A script (`scripts/seed.ts`) can be run to populate initial areas, objects, action definitions, and NPCs into the Supabase database.
+2.  **Backend Server Starts**: The FastAPI application initializes. The `scheduler.start_loop()` function is called, which begins the main simulation loop (`advance_tick`) running periodically (e.g., every 1 real second).
+3.  **Frontend Connects**: The React frontend establishes a WebSocket connection to the backend for receiving tick updates.
+4.  **Simulation Tick (`advance_tick` in `scheduler.py`):
+    *   **Increment Time**: The global simulation time (`sim_min` in `sim_clock`, `day` in `environment`) is advanced.
+    *   **Fetch State**: Current data for all NPCs and areas is fetched from the database.
+    *   **Update NPC Actions & State (`update_npc_actions_and_state` function for each NPC):
+        *   **Action Completion**: Checks if the NPC's current action has finished based on its duration.
+        *   **New Action Selection**: If idle or action completed, selects the next scheduled `action_instance` from the NPC's `plan` for the current day.
+        *   **Action-Driven Movement**: If the new action involves an object in a specific area, the NPC's `spawn` coordinates are updated to a random point within that object's area (using full expected area dimensions like 400x300, minus a margin).
+        *   **Same-Area Wander**: Each NPC has an independent probability (read from `npc.wander_probability` in DB, defaults to 0.4) to make a random move within their current area's full expected dimensions (minus margin). This occurs if no new action caused a move, or if an action started but didn't involve a move.
+        *   **Database Updates**: NPC's `current_action_id` and `spawn` (position) are saved to the database if changed.
+        *   **Area Change Observations**: If an NPC moves to a new area, `create_area_change_observations` is called, which can trigger dialogue requests via `dialogue_service.add_dialogue_request_ext` if other NPCs are present.
+    *   **Process Dialogues**: `dialogue_service.process_pending_dialogues` is called. This checks pending requests, generates dialogue turns using an LLM if conditions are met (cooldowns, etc.), saves dialogue turns, and creates observation memories for each turn. NPCs involved in new dialogues might be marked for replanning.
+    *   **Replanning (Post-Dialogue)**: NPCs marked for replanning by the dialogue service will have `run_daily_planning` triggered for them to adjust their current day's plan.
+    *   **Scheduled Planning/Reflection & Other Events**:
+        *   **Nightly Reflection** (`run_nightly_reflection`): Triggers around sim-midnight (e.g., 00:00) for the day just ended. NPCs reflect on their memories, generating new `reflect` memories with importance scores.
+        *   **Daily Planning** (`run_daily_planning`): Triggers around 5 AM sim-time. NPCs generate a plan for the current day, creating `action_instance` and `plan` records, and a `plan` memory.
+        *   **Plan Adherence Observations**: At set times (e.g., noon, midnight), observations about plan adherence are created.
+        *   **Random Challenges** (`spawn_random_challenge`): A chance each tick to trigger a global event (e.g., fire alarm), creating a `sim_event` record. NPCs may react to these events based on their logic.
+    *   **WebSocket Broadcast**: A `tick_update` message with the new sim time and day is broadcast to all connected clients.
+5.  **Frontend Updates**:
+    *   Receives `tick_update` via WebSocket.
+    *   Fetches full `/state` from the API (includes NPCs with current positions, emojis, areas, clock).
+    *   Re-renders the `CanvasStage` with updated NPC positions and emojis.
+    *   Updates the `ClockOverlay`.
+    *   Displays new dialogue turns or event messages (can be enhanced from current basic logging).
 
 ## 4. Data Model — Entities & Relationships
 
-Below is the complete entity set for v0.1.  Each interface name doubles as the table name in the relational store and the TypeScript type in the API layer.
+Below is the complete entity set for v0.1. Each interface name generally corresponds to a table name in the relational store (Supabase/PostgreSQL) and is represented here in a TypeScript-like style for clarity.
 
 ### 4.1 Entity Overview
 
 | Entity             | Purpose                                                          | Key Relationships                                                                 |
 | ------------------ | ---------------------------------------------------------------- | --------------------------------------------------------------------------------- |
-| **Environment**    | Global singleton storing sim‑wide settings (day counter, speed). | ONE-to-MANY → `Event`; ONE-to-ONE → `SimClock`                                    |
-| **Area**           | Logical room/zone.                                               | ONE-to-MANY → `Object`, `NPC` (via `NPC.state.position.areaId`)                   |
-| **Object**         | Interactive item inside an `Area`.                               | ONE-to-MANY ← `ActionInstance`                                                    |
-| **NPC**            | Core agent record (personality, state).                          | MANY-to-ONE → `Area`; ONE-to-MANY → `Memory`, `Plan`, `DialogueTurn`, `Encounter` |
-| **ActionDef**      | Master list of possible actions.                                 | ONE-to-MANY → `ActionInstance`                                                    |
-| **ActionInstance** | A concrete, scheduled or in-progress action for one NPC.         | MANY-to-ONE → `NPC`, `Object?`                                                    |
-| **Plan**           | Daily ordered list of `ActionInstance` refs.                     | ONE-to-MANY → `ActionInstance`                                                    |
-| **Memory**         | Atomic memory row (plan/observation/reflection).                 | MANY-to-ONE → `NPC`                                                               |
-| **Encounter**      | One-off proximity event between two NPCs.                        | MANY-to-ONE → `NPC` (actor) + `NPC` (target)                                      |
-| **Dialogue**       | Parent record for a two-NPC conversation.                        | ONE-to-MANY → `DialogueTurn`                                                      |
-| **DialogueTurn**   | Single utterance within a `Dialogue`.                            | MANY-to-ONE → `Dialogue`, `NPC` (speaker)                                         |
-| **Event**          | Global random or system event (fire alarm).                      | MANY-to-ONE → `Environment`                                                       |
-| **SimClock**       | Singleton tracking current sim time & speed.                     | ONE-to-ONE ← `Environment`                                                        |
+| **environment**    | Global singleton storing sim‑wide settings (day counter, speed). | ONE-to-MANY → `sim_event`; ONE-to-ONE → `sim_clock` (conceptually linked)       |
+| **area**           | Logical room/zone with defined boundaries.                       | ONE-to-MANY → `object`, `npc` (via `npc.spawn.areaId`)                   |
+| **object**         | Interactive item inside an `area`.                               | ONE-to-MANY ← `action_instance`                                                    |
+| **npc**            | Core agent record (personality, state, position).                | MANY-to-ONE → `area` (via `spawn.areaId`); ONE-to-MANY → `memory`, `plan`, `dialogue_turn`, `encounter` (actor/target), `action_instance` |
+| **action_def**     | Master list of possible actions with their properties.           | ONE-to-MANY → `action_instance`                                                    |
+| **action_instance**| A concrete, scheduled or in-progress action for one NPC.         | MANY-to-ONE → `npc`, `action_def`, `object` (optional)                        |
+| **plan**           | Daily ordered list of `action_instance` UUIDs for an NPC.        | ONE-to-MANY → `action_instance` (conceptually, via UUID array)                   |
+| **memory**         | Atomic memory row (plan/observation/reflection/dialogue).        | MANY-to-ONE → `npc`                                                               |
+| **encounter**      | One-off proximity event between two NPCs (used to trigger dialogue). | MANY-to-ONE → `npc` (actor) + `npc` (target)                                      |
+| **dialogue**       | Parent record for a two-NPC conversation.                        | ONE-to-MANY → `dialogue_turn`                                                      |
+| **dialogue_turn**  | Single utterance within a `dialogue`.                            | MANY-to-ONE → `dialogue`, `npc` (speaker)                                         |
+| **sim_event**      | Global random or system event (fire alarm, pizza drop).          | MANY-to-ONE → `environment` (conceptually linked)                                 |
+| **sim_clock**      | Singleton tracking current simulation time (minute of day).        | ONE-to-ONE ← `environment` (conceptually linked)                                  |
 
-### 4.2 Detailed Schemas Detailed Schemas (TypeScript‑style)
+### 4.2 Detailed Schemas (TypeScript‑style, reflecting Supabase structure)
 
 ```ts
-export type UUID = string;
+export type UUID = string; // Typically a string representation of a UUID
+export type JsonB = any; // Represents JSONB type in Supabase
+export type Vector = number[]; // Represents pgvector type
 
 export interface NPC {
   id: UUID;
   name: string;
-  backstory: string;
   traits: string[];            // e.g. ["friendly","lazy"]
-  relationships: Record<UUID, string>; // npcId -> "friend" | "rival" | …
-  spawn: Position;
-  state: NPCState;
+  backstory?: string;           // Nullable
+  relationships?: JsonB;        // Default: {}
+  // spawn contains current position and area. x,y are local to the areaId.
+  spawn: { x: number; y: number; areaId: UUID; }; 
+  energy?: number;              // Default: 100, Nullable
+  current_action_id?: UUID;   // FK action_instance, Nullable
+  wander_probability?: number;  // Float, Nullable, e.g., 0.4
 }
 
-export interface Position { x: number; y: number; areaId: UUID; }
+// Position is implicitly part of npc.spawn
+// export interface Position { x: number; y: number; areaId: UUID; }
 
-export interface NPCState {
-  position: Position;
-  energy: number;             // 0‑100
-  currentActionId?: UUID;     // FK ActionInstance
-}
+// NPCState is represented by fields directly on NPC and current_action_id
 
 export interface Area {
   id: UUID;
-  name: string;               // "Bedroom"
-  bounds: { x: number; y: number; w: number; h: number };
+  name: string;
+  bounds: { x: number; y: number; w: number; h: number }; // Defines visual quadrant in frontend, not strictly used by backend for NPC local coords
 }
 
-export interface Object {
+export interface SupabaseObject { // Renamed to avoid conflict with JavaScript Object
   id: UUID;
-  areaId: UUID;               // FK Area
-  name: string;               // "Bed"
-  state: string;              // "occupied" | "free" | …
-  position: { x: number; y: number };
+  area_id: UUID;              // FK area
+  name: string;
+  state?: string;             // Default: 'free', Nullable
+  pos: { x: number; y: number }; // x,y are local to the area_id
 }
 
 export interface ActionDef {
   id: UUID;
-  title: string;              // "Brush Teeth"
-  emoji: string;              // "🪥"
-  baseDuration: number;       // minutes
-  preconditions?: string[];   // rule ids
-  postEffects: string[];      // state tags
+  title?: string;             // Nullable
+  emoji?: string;             // Nullable
+  base_minutes?: number;      // Nullable (used as base_duration in some contexts)
+  preconds?: string[];        // Nullable
+  post_effects?: string[];    // Nullable
 }
 
 export interface ActionInstance {
   id: UUID;
-  npcId: UUID;                // FK NPC
-  defId: UUID;                // FK ActionDef
-  objectId?: UUID;            // optional FK Object
-  startSimMin: number;        // scheduled start
-  durationMin: number;        // may differ after modifiers
-  status: "queued" | "active" | "done";
+  npc_id: UUID;               // FK npc
+  def_id: UUID;               // FK action_def
+  object_id?: UUID;           // Nullable, FK object
+  start_min?: number;         // Nullable (sim minutes into the current day for the plan)
+  duration_min?: number;      // Nullable
+  status?: "queued" | "active" | "done"; // Nullable, CHECK constraint in DB
 }
 
 export interface Plan {
   id: UUID;
-  npcId: UUID;                // FK NPC
-  simDate: string;            // YYYY‑MM‑DD
-  actionInstanceIds: UUID[];  // ordered
+  npc_id: UUID;               // FK npc
+  sim_day?: number;           // Nullable
+  actions?: UUID[];           // Nullable (array of action_instance UUIDs)
 }
 
-export type MemoryKind = "plan" | "obs" | "reflect";
+export type MemoryKind = "plan" | "obs" | "reflect" | "dialogue_summary"; // Expanded based on usage
 export interface Memory {
   id: UUID;
-  npcId: UUID;
-  simMin: number;
-  kind: MemoryKind;
-  content: string;
-  importance: number;         // from reflection (1‑5)
-  embedding: number[];        // vector dims 1536
+  npc_id: UUID;
+  sim_min?: number;           // Nullable (absolute sim minutes from start of sim)
+  kind?: MemoryKind;          // Nullable, CHECK constraint in DB
+  content?: string;           // Nullable
+  importance?: number;        // Nullable (1‑5)
+  embedding?: Vector;         // Nullable, pgvector type (e.g., 1536 dimensions)
 }
 
 export interface Encounter {
   id: UUID;
-  tick: number;
-  actorId: UUID;              // NPC who noticed
-  targetId: UUID;             // NPC or Object
-  description: string;
+  tick?: number;              // Nullable (sim_min at time of encounter)
+  actor_id?: UUID;            // Nullable, FK npc
+  target_id?: UUID;           // Nullable, FK npc
+  description?: string;       // Nullable
 }
 
 export interface Dialogue {
   id: UUID;
-  npcA: UUID;
-  npcB: UUID;
-  startSimMin: number;
-  endSimMin?: number;
+  npc_a?: UUID;               // Nullable, FK npc
+  npc_b?: UUID;               // Nullable, FK npc
+  start_min?: number;         // Nullable
+  end_min?: number;           // Nullable
 }
 
 export interface DialogueTurn {
   id: UUID;
-  dialogueId: UUID;
-  speakerId: UUID;
-  simMin: number;
-  text: string;
+  dialogue_id: UUID;          // FK dialogue
+  speaker_id?: UUID;          // Nullable, FK npc
+  sim_min?: number;           // Nullable
+  text?: string;              // Nullable
 }
 
-export interface Event {
+export interface SimEvent { // Renamed from Event to match DB table
   id: UUID;
-  type: string;               // "fireAlarm" | "pizzaDrop"
-  startSimMin: number;
-  endSimMin?: number;
-  metadata: Record<string, any>;
+  type?: string;              // Nullable, e.g. "fireAlarm"
+  start_min?: number;         // Nullable
+  end_min?: number;           // Nullable
+  metadata?: JsonB;           // Nullable, Default: null
 }
 
 export interface Environment {
-  id: 1;                      // enforced singleton
-  day: number;                // starts at 1, increments at 24h sim time
-  speed: number;              // real‑sec per sim‑min
+  id: 1;                      // Enforced singleton (PRIMARY KEY CHECK (id=1))
+  day?: number;               // Nullable
+  speed?: number;             // Nullable (controls sim-minutes per real-second tick)
 }
 
 export interface SimClock {
-  id: 1;
-  simMin: number;             // monotonically increases
-  speed: number;              // mirror of Environment.speed (cache)
+  id: 1;                      // Enforced singleton (PRIMARY KEY CHECK (id=1))
+  sim_min?: number;           // Nullable (current minute of the current simulation day, 0-1439)
+  speed?: number;             // Nullable (DEPRECATED - speed is read from Environment table)
 }
 ```
 
@@ -302,7 +324,7 @@ NPC_B: …
 
 * **Proximity**: Euclidean < 30 px OR same area.
 * **Dialogue exit**: after 3–5 turns or new higher‑priority action.
-* **Random Challenges**: 5 % chance per tick → emits challenge event (fire, power cut, snack drop). Handled like any other encountered object with `priority=high`.
+* **Random Challenges**: 5 % chance per tick → emits challenge event (fire, power cut, snack drop). Handled like any other encountered object with `priority=high`.
 
 ## 8. API Endpoints
 
@@ -330,6 +352,6 @@ App
 • Black background; white outlines for each `Area`.
 • Dots default to white; colour‑coded per NPC after >1 agent.
 • Tiny emoji floats above a dot while an action is active.
-• ClockOverlay updates every tick: *“Day 3 — 14:25”* (5 sim‑min / real‑sec).
+• ClockOverlay updates every tick: *"Day 3 — 14:25"* (5 sim‑min / real‑sec).
 
 ---

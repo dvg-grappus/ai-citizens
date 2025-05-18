@@ -37,7 +37,7 @@ PLAN_USER_PROMPT_TEMPLATE = (
 # CONTEXT: {{retrieved_memories}}
 # OUTPUT: • … • …
 # Also assign Importance 1—5 to each line.
-REFLECTION_SYSTEM_PROMPT_TEMPLATE = "You are {name}. Your task is to summarize the key events and your main thoughts for {sim_date} as exactly 1-3 bullet points. Each bullet point MUST start with '•' and end with [Importance: N] where N is 1-5."
+REFLECTION_SYSTEM_PROMPT_TEMPLATE = "You are {npc_name}. Your task is to summarize the key events and your main thoughts for {sim_date} as exactly 1-3 bullet points. Each bullet point MUST start with '•' and end with [Importance: N] where N is 1-5."
 REFLECTION_USER_PROMPT_TEMPLATE = (
     "Consider your core traits: {traits_summary}.\n"
     "Based on the following log of your activities and observations from the day, reflect on what happened.\n"
@@ -62,18 +62,16 @@ REFLECTION_USER_PROMPT_TEMPLATE = (
 # NPC_B: …
 DIALOGUE_SYSTEM_PROMPT_TEMPLATE = (
     "You are an AI generating a brief, natural dialogue between two NPCs in a simulation. "
-    "Generate exactly {num_turns} lines of dialogue in total (e.g., if num_turns is 3, generate 3 lines alternating speakers)."
+    "You are {npc_name} with the following traits: {traits}. Generate a short, realistic dialogue."
 )
 DIALOGUE_USER_PROMPT_TEMPLATE = (
-    "NPC A is {npc_a_name} (Traits: {npc_a_traits}).\n"
-    "NPC B is {npc_b_name} (Traits: {npc_b_traits}).\n"
-    "They have just encountered each other. The trigger for this interaction was: {trigger_event}.\n"
-    "Consider their personalities and any relevant memories provided below.\n"
-    "CONTEXT (relevant memories for both NPCs):\n{retrieved_memories}\n"
-    "The dialogue should start with {npc_a_name} speaking. Format it like this:\n"
-    "{npc_a_name}: ...\n"
-    "{npc_b_name}: ...\n"
-    "TASK: Generate the dialogue."
+    "You are talking with {other_npc_name} who has these traits: {other_npc_traits}.\n"
+    "You are currently in the {area_name}.\n"
+    "Consider your personality and any relevant memories provided below.\n"
+    "CONTEXT (your relevant memories):\n{memories}\n"
+    "Write a brief, natural dialogue with just 3-4 exchanges between you and {other_npc_name}.\n"
+    "Focus on what YOU would say, but include {other_npc_name}'s responses to create a coherent conversation.\n"
+    "Make it feel realistic and appropriate to both your personalities."
 )
 
 # Helper to format traits for prompts
@@ -82,4 +80,13 @@ def format_traits(traits_list: list[str]) -> str:
         return "no specific traits listed"
     if len(traits_list) == 1:
         return traits_list[0]
-    return ", ".join(traits_list[:-1]) + " and " + traits_list[-1] 
+    return ", ".join(traits_list[:-1]) + " and " + traits_list[-1]
+
+DIALOGUE_SUMMARY_SYSTEM_PROMPT = "You are an expert in summarizing conversations."
+DIALOGUE_SUMMARY_USER_PROMPT_TEMPLATE = """You are {npc_name}.
+Summarize the following conversation you had with {other_npc_name} in a single, concise sentence, from your perspective. Focus on the main topic or outcome.
+
+Conversation:
+{dialogue_transcript}
+
+Your one-sentence summary:""" 

@@ -141,4 +141,16 @@ export const filterButtonStyles = {
     inactive: {
         opacity: 0.6,
     }
+};
+
+export const viewTranscriptButtonStyles: React.CSSProperties = {
+    backgroundColor: '#4a4a4a',
+    color: '#e0e0e0',
+    border: '1px solid #666',
+    padding: '4px 8px',
+    borderRadius: '4px',
+    cursor: 'pointer',
+    fontSize: '0.8em',
+    marginTop: '5px',
+    display: 'inline-block',
 }; 
