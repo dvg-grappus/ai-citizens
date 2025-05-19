@@ -180,7 +180,7 @@ export interface Plan {
   actions?: UUID[];           // Nullable (array of action_instance UUIDs)
 }
 
-export type MemoryKind = "plan" | "obs" | "reflect" | "dialogue_summary"; // Expanded based on usage
+export type MemoryKind = "plan" | "obs" | "reflect" | "dialogue_summary" | "replan"; // Expanded based on usage
 export interface Memory {
   id: UUID;
   npc_id: UUID;
