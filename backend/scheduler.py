@@ -15,8 +15,8 @@ from .prompts import (
     REFLECTION_SYSTEM_PROMPT_TEMPLATE, REFLECTION_USER_PROMPT_TEMPLATE, 
     DIALOGUE_SYSTEM_PROMPT_TEMPLATE, DIALOGUE_USER_PROMPT_TEMPLATE, format_traits
 )
-from .memory_service import retrieve_memories, get_embedding, save_memory_batch, get_recent_memories_for_npc
-from .services import supa, execute_supabase_query, get_npc_by_id, save_npc, get_object_by_id, get_area_details, update_npc_current_action
+from .memory_service import retrieve_memories, get_embedding
+from .services import supa, execute_supabase_query, get_area_details
 from .websocket_utils import register_ws, unregister_ws, broadcast_ws_message
 from .planning_and_reflection import run_daily_planning, run_nightly_reflection
 from .dialogue_service import (
