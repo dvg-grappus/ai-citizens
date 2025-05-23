@@ -3,6 +3,12 @@ import { Stage, Layer, Rect, Text as KonvaText } from 'react-konva';
 import { useSimStore } from '../store/simStore';
 import type { DisplayNPC, DisplayArea } from '../store/simStore';
 import NPCDot from './NPCDot';
+import {
+    STAGE_WIDTH,
+    STAGE_HEIGHT,
+    AREA_WIDTH,
+    AREA_HEIGHT,
+} from '../constants';
 
 // Function to get a color based on NPC ID or name (simple hash for variety)
 const getNPCColor = (id: string): string => {
@@ -15,17 +21,11 @@ const getNPCColor = (id: string): string => {
     return "#" + "000000".substring(0, 6 - color.length) + color;
 };
 
-// Define main canvas dimensions - let's aim for a larger fixed size for now
-const STAGE_WIDTH = 800; // Increased
-const STAGE_HEIGHT = 600; // Increased, can be rectangular
-
 // Define how the 4 areas are laid out within this stage
 const AREA_LAYOUT = {
     rows: 2,
     cols: 2,
 };
-const AREA_WIDTH = STAGE_WIDTH / AREA_LAYOUT.cols;
-const AREA_HEIGHT = STAGE_HEIGHT / AREA_LAYOUT.rows;
 
 interface DefinedArea {
     id: string;
