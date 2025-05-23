@@ -1,36 +1,27 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { Circle, Text as KonvaText, Group } from 'react-konva';
-import Konva from 'konva'; // Import Konva for Tween
-import type { DisplayNPC } from '../store/simStore'; // Assuming DisplayNPC includes x, y, emoji, name, id
-import { useSimActions, useSimStore } from '../store/simStore'; // Import actions and store
-
-// Define global constants for stage size - we need these for Lounge quadrant detection
-const STAGE_WIDTH = 800;  // Must match the size in CanvasStage.tsx
-const STAGE_HEIGHT = 600; // Must match the size in CanvasStage.tsx
-const AREA_WIDTH = STAGE_WIDTH / 2;
-const AREA_HEIGHT = STAGE_HEIGHT / 2;
-
-// Map from area name to position offset
-const AREA_OFFSETS: Record<string, {x: number, y: number}> = {
-    'Bedroom': { x: 0, y: 0 },
-    'Office': { x: AREA_WIDTH, y: 0 },
-    'Bathroom': { x: 0, y: AREA_HEIGHT },
-    'Lounge': { x: AREA_WIDTH, y: AREA_HEIGHT }
-};
+import Konva from 'konva';
+import type { DisplayNPC } from '../store/simStore';
+import { useSimActions, useSimStore } from '../store/simStore';
+import {
+    STAGE_WIDTH,
+    STAGE_HEIGHT,
+    AREA_WIDTH,
+    AREA_HEIGHT,
+    AREA_OFFSETS,
+    NPCDotSize,
+    EmojiSize,
+    NameFontSize,
+    ANIMATION_DURATION_SECONDS,
+    IDLE_MOVEMENT_RANGE,
+    IDLE_MOVEMENT_INTERVAL_MS,
+    MARGIN,
+} from '../constants';
 
 interface NPCDotProps {
     npc: DisplayNPC;
     color: string; // Pass color as a prop
 }
-
-const NPCDotSize = 12; // Was 8, increased to 12 (1.5x, can go more if needed)
-const EmojiSize = 20;  // Was 14, increased to 20
-const NameFontSize = 10; // Was 8, increased to 10
-const ANIMATION_DURATION_SECONDS = 0.8; // Reduced for more responsive animations
-
-// Very small subtle idle movements to avoid conflicts with backend updates
-const IDLE_MOVEMENT_RANGE = 3; // Reduced from 5 to 3
-const IDLE_MOVEMENT_INTERVAL_MS = 3000; // Increased to 3 seconds to reduce animation frequency
 
 const NPCDot: React.FC<NPCDotProps> = ({ npc, color }) => {
     // Always initialize these hooks regardless of conditions
@@ -71,7 +62,6 @@ const NPCDot: React.FC<NPCDotProps> = ({ npc, color }) => {
         
         // Apply boundary constraints - keep NPCs within their respective quadrants
         // Add larger margins to ensure name labels are visible
-        const MARGIN = 50; // Was 20, changed back to 50 to prevent label cutoff
         
         const minX = offset.x + MARGIN;
         const maxX = offset.x + AREA_WIDTH - MARGIN;
