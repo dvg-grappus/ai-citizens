@@ -264,28 +264,7 @@ async def advance_tick():
         # --- End Dialogue Encounter Detection & Initiation ---
 
         # Process pending dialogues using the external service
-        npcs_to_replan_after_dialogue = await process_dialogues_ext(
-            current_sim_minutes_total
-        )
-        if npcs_to_replan_after_dialogue:
-            print(
-                f"Scheduler: {len(npcs_to_replan_after_dialogue)} NPCs need replanning after dialogues: {npcs_to_replan_after_dialogue}"
-            )
-            for npc_id_to_replan in npcs_to_replan_after_dialogue:
-                # Check if NPC exists in all_npcs_data before attempting to replan
-                if any(npc["id"] == npc_id_to_replan for npc in all_npcs_data):
-                    print(
-                        f"Scheduler: Triggering replan for NPC {npc_id_to_replan} due to dialogue outcome."
-                    )
-                    await run_daily_planning(
-                        actual_current_day,
-                        current_sim_minutes_total,
-                        specific_npc_id=npc_id_to_replan,
-                    )
-                else:
-                    print(
-                        f"Scheduler: NPC {npc_id_to_replan} marked for replan not found in current NPC list. Skipping replan."
-                    )
+        await process_dialogues_ext(current_sim_minutes_total)
 
         # MODIFIED: Split reflection and planning into separate conditions
         # Run reflections at midnight (start of day)

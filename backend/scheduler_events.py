@@ -76,7 +76,11 @@ async def spawn_random_challenge(current_sim_minutes_total: int, current_day: in
                 "day": current_day,
             }
             await broadcast_ws_message("sim_event", ws_event_data)
-            await create_event_observations(challenge, current_sim_minutes_total)
+            affected = await create_event_observations(challenge, current_sim_minutes_total)
+            if affected:
+                from .planning_and_reflection import run_replanning
+                for npc_id in affected:
+                    await run_replanning(npc_id, {"description": challenge["effect_desc"]}, current_sim_minutes_total)
         else:
             error_info = "No data returned from insert"
             if hasattr(event_response_obj, "error") and event_response_obj.error:
@@ -89,13 +93,14 @@ async def spawn_random_challenge(current_sim_minutes_total: int, current_day: in
 
 
 async def create_event_observations(event_data: Dict, current_sim_minutes_total: int):
-    """Create observation memories for NPCs based on environmental events."""
+    """Create observation memories for NPCs based on environmental events.
+    Returns a list of NPC IDs who received observations."""
     try:
         npcs_res = await execute_supabase_query(
             lambda: supa.table("npc").select("id, name, spawn").execute()
         )
         if not (npcs_res and npcs_res.data):
-            return
+            return []
 
         target_area_name = event_data.get("metadata", {}).get("target_area_name")
         target_area_id = None
@@ -116,6 +121,7 @@ async def create_event_observations(event_data: Dict, current_sim_minutes_total:
             f"Something happened: {event_data.get('label', 'Unknown event')}",
         )
 
+        affected_npcs = []
         for npc in npcs_res.data:
             npc_id = npc.get("id")
             npc_area_id = npc.get("spawn", {}).get("areaId")
@@ -142,5 +148,8 @@ async def create_event_observations(event_data: Dict, current_sim_minutes_total:
                 await execute_supabase_query(
                     lambda: supa.table("memory").insert(mem_payload).execute()
                 )
+                affected_npcs.append(npc_id)
+        return affected_npcs
     except Exception as e:
         print(f"Error creating event observations: {e}")
+        return []

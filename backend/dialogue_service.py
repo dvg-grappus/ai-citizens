@@ -69,12 +69,12 @@ async def add_pending_dialogue_request(npc_a_id: str, npc_b_id: str, npc_a_name:
         'trigger_event': trigger_event, 'tick': current_tick
     })
 
-async def process_pending_dialogues(current_sim_minutes_total: int) -> List[str]:
-    """Processes dialogues, checks/updates cooldowns in DB."""
+async def process_pending_dialogues(current_sim_minutes_total: int) -> None:
+    """Processes dialogues and triggers replanning when appropriate."""
     global pending_dialogue_requests
-    npcs_to_replan = []
 
-    if not pending_dialogue_requests: return npcs_to_replan
+    if not pending_dialogue_requests:
+        return
     print(f"DEBUG: Processing {len(pending_dialogue_requests)} pending dialogue requests at tick {current_sim_minutes_total}.")
     
     processed_indices = []
@@ -210,11 +210,10 @@ async def process_pending_dialogues(current_sim_minutes_total: int) -> List[str]
                 db_res_sum_b = await execute_supabase_query(lambda: supa.table('memory').insert(mem_payload_b).execute())
                 if db_res_sum_b.data: print(f"    Saved dialogue summary for {npc_b_name}"); await broadcast_ws_message("dialogue_event", {"npc_id": npc_b_id, "npc_name": npc_b_name, "other_participant_name": npc_a_name, "summary": summary_b, "dialogue_id": dialogue_id, "sim_min_of_day": current_sim_minutes_total % 1440, "day": (current_sim_minutes_total // 1440) + 1 })
             
-            # Restore replanning logic for both NPCs
-            if random.random() < 0.30: # Replanning logic for NPC A
-                if npc_a_id not in npcs_to_replan: npcs_to_replan.append(npc_a_id)
-            if random.random() < 0.30: # Replanning logic for NPC B
-                if npc_b_id not in npcs_to_replan: npcs_to_replan.append(npc_b_id)
+            # Trigger replanning for both NPCs based on dialogue summary
+            from .planning_and_reflection import run_replanning
+            await run_replanning(npc_a_id, {"description": summary_a}, current_sim_minutes_total)
+            await run_replanning(npc_b_id, {"description": summary_b}, current_sim_minutes_total)
         else: # No raw_dialogue_text
              print(f"    LLM call for dialogue between {npc_a_name} & {npc_b_name} returned no text.")
         
@@ -222,5 +221,5 @@ async def process_pending_dialogues(current_sim_minutes_total: int) -> List[str]
     
     for index in sorted(processed_indices, reverse=True):
         pending_dialogue_requests.pop(index)
-        
-    return npcs_to_replan 
+
+    return None

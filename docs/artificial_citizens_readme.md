@@ -78,14 +78,14 @@ A weekend‑scale proof‑of‑concept that demonstrates personality‑driven ag
         *   **Same-Area Wander**: Each NPC has an independent probability (read from `npc.wander_probability` in DB, defaults to 0.4) to make a random move within their current area's full expected dimensions (minus margin). This occurs if no new action caused a move, or if an action started but didn't involve a move.
         *   **Database Updates**: NPC's `current_action_id` and `spawn` (position) are saved to the database if changed.
         *   **Area Change Observations**: If an NPC moves to a new area, `create_area_change_observations` is called, which can trigger dialogue requests via `dialogue_service.add_dialogue_request_ext` if other NPCs are present.
-    *   **Process Dialogues**: `dialogue_service.process_pending_dialogues` is called. This checks pending requests, generates dialogue turns using an LLM if conditions are met (cooldowns, etc.), saves dialogue turns, and creates observation memories for each turn. NPCs involved in new dialogues might be marked for replanning.
-    *   **Replanning (Post-Dialogue)**: NPCs marked for replanning by the dialogue service will have `run_daily_planning` triggered for them to adjust their current day's plan.
+    *   **Process Dialogues**: `dialogue_service.process_pending_dialogues` is called. This checks pending requests, generates dialogue turns using an LLM if conditions are met (cooldowns, etc.), saves dialogue turns, and creates observation memories for each turn. After each dialogue both participants call `run_replanning` based on the generated summary.
+    *   **Replanning (Post-Dialogue)**: `run_replanning` revises the NPC's remaining plan and stores a `replan` memory. The baseline `run_daily_planning` still runs each morning at 05:00.
     *   **Scheduled Planning/Reflection & Other Events**:
         *   **Nightly Reflection** (`run_nightly_reflection`): Triggers around sim-midnight (e.g., 00:00) for the day just ended. NPCs reflect on their memories, generating new `reflect` memories with importance scores.
         *   **Daily Planning** (`run_daily_planning`): Triggers around 5 AM sim-time. NPCs generate a plan for the current day, creating `action_instance` and `plan` records, and a `plan` memory.
         *   **Plan Adherence Observations**: At set times (e.g., noon, midnight), observations about plan adherence are created.
         *   **Random Challenges** (`spawn_random_challenge`): A chance each tick to trigger a global event (e.g., fire alarm), creating a `sim_event` record. NPCs may react to these events based on their logic.
-    *   **WebSocket Broadcast**: A `tick_update` message with the new sim time and day is broadcast to all connected clients.
+    *   **WebSocket Broadcast**: A `tick_update` message with the new sim time and day is broadcast to all connected clients. Additional tags like `planning_event`, `reflection_event`, and `replan_event` notify the frontend about planning, reflection, or mid-day replanning updates.
 5.  **Frontend Updates**:
     *   Receives `tick_update` via WebSocket.
     *   Fetches full `/state` from the API (includes NPCs with current positions, emojis, areas, clock).
