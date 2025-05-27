@@ -292,11 +292,11 @@ Add appropriate emoji if relevant."""
             from .memory_service import get_embedding
             # Get all NPCs
             npcs_res = await execute_supabase_query(lambda: supa.table('npc').select('id').execute())
+            affected_npcs = []
             if npcs_res and npcs_res.data:
                 for npc in npcs_res.data:
                     npc_id = npc.get('id')
                     if npc_id:
-                        # Create observation
                         observation_content = f"[Environment] I noticed: {final_message}"
                         observation_embedding = await get_embedding(observation_content)
                         if observation_embedding:
@@ -305,10 +305,15 @@ Add appropriate emoji if relevant."""
                                 'sim_min': current_sim_minutes_total,
                                 'kind': 'obs',
                                 'content': observation_content,
-                                'importance': 3,  # User events are important
+                                'importance': 3,
                                 'embedding': observation_embedding
                             }
                             await execute_supabase_query(lambda: supa.table('memory').insert(mem_payload).execute())
+                            affected_npcs.append(npc_id)
+
+            from .planning_and_reflection import run_replanning
+            for npc_id in affected_npcs:
+                await run_replanning(npc_id, {'description': final_message}, current_sim_minutes_total)
             
             return {
                 "status": "success",

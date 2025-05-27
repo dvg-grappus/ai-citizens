@@ -13,6 +13,8 @@ from .memory_service import retrieve_memories, get_embedding
 from .services import supa, execute_supabase_query # supa is used directly
 from .websocket_utils import broadcast_ws_message # Import from the new utils file
 
+SIM_DAY_MINUTES = 24 * 60
+
 # It's good practice to define constants if they are specific to this module,
 # or import them if they are global settings.
 # For now, assuming no new constants are needed here beyond what's imported.
@@ -234,4 +236,178 @@ async def run_nightly_reflection(day_being_reflected: int, current_sim_minutes_t
         print(f"ERROR in run_nightly_reflection for NPC {npc.get('name', 'UNKNOWN') if 'npc' in locals() else 'N/A'}: {e}")
         traceback.print_exc()
         if 'npc' in locals() and npc: # Check if npc is defined
-             await broadcast_ws_message("reflection_event", {"npc_name": npc.get('name', 'UNKNOWN'), "status": "error_reflection", "day": day_being_reflected}) 
+             await broadcast_ws_message("reflection_event", {"npc_name": npc.get('name', 'UNKNOWN'), "status": "error_reflection", "day": day_being_reflected})
+
+
+async def run_replanning(npc_id: str, event_info: Dict, current_sim_min: int) -> None:
+    """Replan the remainder of the day for a single NPC based on an event."""
+    try:
+        npc_res = await execute_supabase_query(
+            lambda: supa.table("npc")
+            .select("name, traits")
+            .eq("id", npc_id)
+            .maybe_single()
+            .execute()
+        )
+        if not npc_res or not npc_res.data:
+            return
+
+        npc_name = npc_res.data.get("name")
+        npc_traits = npc_res.data.get("traits", [])
+
+        current_day = (current_sim_min // SIM_DAY_MINUTES) + 1
+        sim_min_of_day = current_sim_min % SIM_DAY_MINUTES
+
+        plan_res = await execute_supabase_query(
+            lambda: supa.table("plan")
+            .select("id, actions")
+            .eq("npc_id", npc_id)
+            .eq("sim_day", current_day)
+            .maybe_single()
+            .execute()
+        )
+        if not plan_res or not plan_res.data:
+            return
+
+        plan_id = plan_res.data["id"]
+        existing_action_ids = plan_res.data.get("actions") or []
+
+        action_defs_res = await execute_supabase_query(
+            lambda: supa.table("action_def").select("id, title, base_minutes").execute()
+        )
+        defs_by_id = {d["id"]: d for d in (action_defs_res.data or [])}
+
+        action_instances_res = None
+        if existing_action_ids:
+            action_instances_res = await execute_supabase_query(
+                lambda: supa.table("action_instance")
+                .select("id, def_id, start_min, status")
+                .in_("id", existing_action_ids)
+                .order("start_min")
+                .execute()
+            )
+
+        keep_action_ids = []
+        remaining_action_lines = []
+        if action_instances_res and action_instances_res.data:
+            for inst in action_instances_res.data:
+                if inst["start_min"] >= sim_min_of_day and inst["status"] != "done":
+                    title = defs_by_id.get(inst["def_id"], {}).get("title", "?")
+                    remaining_action_lines.append(
+                        f"{inst['start_min'] // 60:02d}:{inst['start_min'] % 60:02d} - {title}"
+                    )
+                else:
+                    keep_action_ids.append(inst["id"])
+
+        remaining_plan_desc = "; ".join(remaining_action_lines) if remaining_action_lines else "None"
+
+        decision_system = f"You control NPC {npc_name}."
+        decision_user = (
+            f"Current time: {sim_min_of_day // 60:02d}:{sim_min_of_day % 60:02d}.\n"
+            f"Upcoming plan: {remaining_plan_desc}.\n"
+            f"Event: {event_info.get('description', '')}.\n"
+            "Should you create a new plan for the rest of the day? Answer Yes or No."
+        )
+
+        decision_raw = call_llm(decision_system, decision_user, max_tokens=5)
+        if not (decision_raw and decision_raw.strip().lower().startswith("y")):
+            return
+
+        memory_query = event_info.get("description", "recent event")
+        retrieved = await retrieve_memories(npc_id, memory_query, "planning", current_sim_min)
+
+        system_prompt = PLAN_SYSTEM_PROMPT_TEMPLATE.format(
+            name=npc_name,
+            sim_date=f"Day {current_day}",
+            traits_summary=format_traits(npc_traits),
+        )
+        user_prompt = (
+            f"You must create a revised schedule starting from {sim_min_of_day // 60:02d}:{sim_min_of_day % 60:02d} because: {event_info.get('description', '')}.\n"
+            f"Use only valid actions. Format each as HH:MM — <ACTION_TITLE>.\n"
+            f"CONTEXT:\n{retrieved}"
+        )
+
+        raw_plan_text = call_llm(system_prompt, user_prompt, max_tokens=300)
+        if not raw_plan_text:
+            return
+
+        new_action_ids = []
+        parsed_actions_for_log = []
+        for line in raw_plan_text.strip().split("\n"):
+            match = re.fullmatch(r"(?:\d+\.\s*)?(\d{2}):(\d{2})\s*[-—–]\s*(.+)", line.strip())
+            if not match:
+                continue
+            hh, mm, title_raw = match.groups()
+            title = title_raw.strip()
+            def_row = next((d for d in defs_by_id.values() if d.get("title") == title), None)
+            if not def_row:
+                continue
+            duration_min = def_row.get("base_minutes", 30)
+            start_min = int(hh) * 60 + int(mm)
+            if start_min < sim_min_of_day:
+                continue
+            action_payload = {
+                "npc_id": npc_id,
+                "def_id": def_row["id"],
+                "start_min": start_min,
+                "duration_min": duration_min,
+                "status": "queued",
+            }
+            insert_res = await execute_supabase_query(
+                lambda: supa.table("action_instance").insert(action_payload).execute()
+            )
+            if insert_res and insert_res.data and len(insert_res.data) > 0:
+                new_id = insert_res.data[0].get("id")
+                if new_id:
+                    new_action_ids.append(new_id)
+                    parsed_actions_for_log.append(f"{hh}:{mm} - {title}")
+
+        if new_action_ids:
+            if remaining_action_lines:
+                await execute_supabase_query(
+                    lambda: supa.table("action_instance")
+                    .delete()
+                    .in_("id", [inst_id for inst_id in existing_action_ids if inst_id not in keep_action_ids])
+                    .execute()
+                )
+
+            updated_ids = keep_action_ids + new_action_ids
+            await execute_supabase_query(
+                lambda: supa.table("plan")
+                .update({"actions": updated_ids})
+                .eq("id", plan_id)
+                .execute()
+            )
+
+            mem_content = (
+                f"Replanned on Day {current_day} at {sim_min_of_day // 60:02d}:{sim_min_of_day % 60:02d}: "
+                f"{'; '.join(parsed_actions_for_log)}"
+            )
+            emb = await get_embedding(mem_content)
+            if emb:
+                mem_payload = {
+                    "npc_id": npc_id,
+                    "sim_min": current_sim_min,
+                    "kind": "replan",
+                    "content": mem_content,
+                    "importance": 3,
+                    "embedding": emb,
+                }
+                await execute_supabase_query(
+                    lambda: supa.table("memory").insert(mem_payload).execute()
+                )
+
+            await broadcast_ws_message(
+                "replan_event",
+                {
+                    "npc_id": npc_id,
+                    "npc_name": npc_name,
+                    "day": current_day,
+                    "sim_min_of_day": sim_min_of_day,
+                },
+            )
+
+    except Exception as e:
+        print(f"ERROR in run_replanning for NPC {npc_id}: {e}")
+        traceback.print_exc()
+

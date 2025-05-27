@@ -17,6 +17,7 @@ interface MemoryStreamTabProps {
 const getMemoryType = (memory: MemoryEvent): string => {
     if (memory.type === 'reflect') return 'reflect';
     if (memory.type === 'plan') return 'plan';
+    if (memory.type === 'replan') return 'replan';
     if (memory.type === 'dialogue_summary') return 'dialogue_summary';
     if (memory.type === 'obs') {
         const content = memory.content || '';
@@ -57,7 +58,7 @@ const MemoryStreamTab: React.FC<MemoryStreamTabProps> = ({ memoryStream }) => {
         });
     }, [memoryStream, activeFilter]);
 
-    const filterTypes = ['all', 'social', 'environment', 'periodic', 'dialogue_summary', 'reflect', 'plan', 'other'];
+    const filterTypes = ['all', 'social', 'environment', 'periodic', 'dialogue_summary', 'reflect', 'plan', 'replan', 'other'];
 
     const handleViewTranscript = (dialogueId: string) => {
         setSelectedDialogueId(dialogueId);
