@@ -3,7 +3,11 @@ import { useSimStore } from '../store/simStore';
 import { createClient } from '@supabase/supabase-js';
 import type { Database } from '../types/supabase';
 
-const ControlsPanel: React.FC = () => {
+interface ControlsPanelProps {
+    onOpenPromptWallet?: () => void;
+}
+
+const ControlsPanel: React.FC<ControlsPanelProps> = ({ onOpenPromptWallet }) => {
     const [isPaused, setIsPaused] = useState(false);
     const apiUrl = import.meta.env.VITE_API_URL;
     const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
@@ -289,6 +293,15 @@ const ControlsPanel: React.FC = () => {
             <button style={{...buttonStyles, backgroundColor: '#c0392b', color: 'white'}} onClick={handleDirectReseedDatabase}>
                 Re-Seed DB
             </button>
+            {onOpenPromptWallet && (
+                <button 
+                    style={{...buttonStyles, backgroundColor: '#e74c3c', color: 'white'}} 
+                    onClick={onOpenPromptWallet}
+                    title="Manage LLM prompts"
+                >
+                    📝 Prompts
+                </button>
+            )}
         </div>
     );
 };

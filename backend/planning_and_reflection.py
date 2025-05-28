@@ -6,8 +6,8 @@ from typing import List, Dict, Optional, Any # Added Any for supa functions if n
 # Imports from the 'backend' package
 from .llm import call_llm
 from .prompts import (
-    PLAN_SYSTEM_PROMPT_TEMPLATE, PLAN_USER_PROMPT_TEMPLATE,
-    REFLECTION_SYSTEM_PROMPT_TEMPLATE, REFLECTION_USER_PROMPT_TEMPLATE, format_traits
+    get_plan_system_prompt, get_plan_user_prompt,
+    get_reflection_system_prompt, get_reflection_user_prompt, format_traits
 )
 from .memory_service import retrieve_memories, get_embedding
 from .services import supa, execute_supabase_query # supa is used directly
@@ -50,8 +50,12 @@ async def run_daily_planning(current_day: int, current_sim_minutes_total: int, s
             planning_query_text = f"What are important considerations for {npc_name} for planning {sim_date_str}?"
             retrieved_memories_str = await retrieve_memories(npc_id, planning_query_text, "planning", current_sim_minutes_total)
             
-            system_prompt = PLAN_SYSTEM_PROMPT_TEMPLATE.format(name=npc_name, sim_date=sim_date_str, traits_summary=npc_traits_summary)
-            user_prompt = PLAN_USER_PROMPT_TEMPLATE.format(retrieved_memories=retrieved_memories_str)
+            system_prompt_template = get_plan_system_prompt()
+            user_prompt_template = get_plan_user_prompt() # This will handle dynamic actions
+
+            system_prompt = system_prompt_template.format(name=npc_name, sim_date=sim_date_str, traits_summary=npc_traits_summary)
+            # PLAN_USER_PROMPT_TEMPLATE now expects {retrieved_memories} as a formatting key
+            user_prompt = user_prompt_template.format(retrieved_memories=retrieved_memories_str)
             raw_plan_text = call_llm(system_prompt, user_prompt, max_tokens=400)
 
             if not raw_plan_text:
@@ -169,8 +173,11 @@ async def run_nightly_reflection(day_being_reflected: int, current_sim_minutes_t
             reflection_query_text = f"Key events and main thoughts for {npc_name} on {sim_date_str}? What are 1-3 most salient high-level questions I can answer about my experiences today?"
             retrieved_memories_str = await retrieve_memories(npc_id, reflection_query_text, "reflection", current_sim_minutes_total)
             
-            system_prompt = REFLECTION_SYSTEM_PROMPT_TEMPLATE.format(npc_name=npc_name, sim_date=sim_date_str)
-            user_prompt = REFLECTION_USER_PROMPT_TEMPLATE.format(traits_summary=npc_traits_summary, retrieved_memories=retrieved_memories_str)
+            system_prompt_template = get_reflection_system_prompt()
+            user_prompt_template = get_reflection_user_prompt()
+            
+            system_prompt = system_prompt_template.format(npc_name=npc_name, sim_date=sim_date_str)
+            user_prompt = user_prompt_template.format(traits_summary=npc_traits_summary, retrieved_memories=retrieved_memories_str)
             
             raw_reflection_text = call_llm(system_prompt, user_prompt, max_tokens=500, model="gpt-4o") # Increased max_tokens for richer reflection
             
@@ -322,9 +329,9 @@ async def run_replanning(npc_id: str, event_info: Dict, current_sim_min: int) ->
 
         decision_system = f"You control NPC {npc_name}."
         decision_user = (
-            f"Current time: {sim_min_of_day // 60:02d}:{sim_min_of_day % 60:02d}.\\n"
-            f"Upcoming plan: {remaining_plan_desc}.\\n"
-            f"Event: {original_event_description}.\\n"
+            f"Current time: {sim_min_of_day // 60:02d}:{sim_min_of_day % 60:02d}.\n"
+            f"Upcoming plan: {remaining_plan_desc}.\n"
+            f"Event: {original_event_description}.\n"
             "Should you create a new plan for the rest of the day? Answer Yes or No."
         )
 
@@ -340,16 +347,26 @@ async def run_replanning(npc_id: str, event_info: Dict, current_sim_min: int) ->
         memory_query = original_event_description 
         retrieved = await retrieve_memories(npc_id, memory_query, "planning", current_sim_min)
 
-        system_prompt = PLAN_SYSTEM_PROMPT_TEMPLATE.format(
+        system_prompt_template = get_plan_system_prompt()
+        # The user prompt for replanning is custom-built here and doesn't directly use get_plan_user_prompt()
+        # because it has specific structural requirements (like the valid_actions_list_str).
+        # We will keep this custom construction.
+        system_prompt = system_prompt_template.format(
             name=npc_name,
             sim_date=f"Day {current_day}",
             traits_summary=format_traits(npc_traits),
         )
         user_prompt = (
-            f"You must create a revised schedule starting from {sim_min_of_day // 60:02d}:{sim_min_of_day % 60:02d} because: {original_event_description}.\\n"
-            f"IMPORTANT: You MUST choose actions EXCLUSIVELY from the following list of valid action titles: [{valid_actions_list_str}].\\n"
-            f"Format each chosen action as HH:MM — <ACTION_TITLE>. Do not include any other text before or after the list of actions.\\n"
-            f"CONTEXT:\\n{retrieved}"
+            f"You must create a revised schedule starting from {sim_min_of_day // 60:02d}:{sim_min_of_day % 60:02d} because: {original_event_description}.\n"
+            f"IMPORTANT: You MUST choose actions EXCLUSIVELY from the following list of valid action titles: [{valid_actions_list_str}].\n"
+            f"Format each chosen action as HH:MM — <ACTION_TITLE>. Do not include any other text before or after the list of actions.\n"
+            # Note: The original PLAN_USER_PROMPT_TEMPLATE included {AVAILABLE_ACTIONS_STR}
+            # This custom replan prompt hardcodes the available actions via valid_actions_list_str
+            # and also structures the CONTEXT part differently.
+            # If we wanted to use get_plan_user_prompt(), we'd need to ensure it can accept all these specific overrides
+            # or that its DB version has placeholders for them.
+            # For now, this custom prompt structure is maintained for replanning.
+            f"CONTEXT:\n{retrieved}"
         )
 
         print(f"REPLANNING: Calling LLM to generate new plan for {npc_name}. Context based on: '{memory_query}'. Valid actions provided: {valid_actions_list_str}")
@@ -359,7 +376,7 @@ async def run_replanning(npc_id: str, event_info: Dict, current_sim_min: int) ->
             print(f"REPLANNING: LLM failed to generate a new plan for {npc_name}. Aborting replan.")
             return
         
-        print(f"REPLANNING: LLM generated raw plan for {npc_name}:\\n{raw_plan_text}")
+        print(f"REPLANNING: LLM generated raw plan for {npc_name}:\n{raw_plan_text}")
 
         new_action_ids = []
         parsed_actions_for_log = []

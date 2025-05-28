@@ -20,6 +20,7 @@ from .services import (
 )
 from . import scheduler # For scheduler.start_loop()
 from backend.websocket_utils import broadcast_ws_message # ADD THIS IMPORT
+from backend.api import prompt_routes # Import the new prompt router
 
 app = FastAPI(title='Artificial Citizens API')
 
@@ -38,6 +39,9 @@ app.add_middleware(
     allow_methods=["*"], # Allows all methods
     allow_headers=["*"], # Allows all headers
 )
+
+# Include the new prompt router
+app.include_router(prompt_routes.router, prefix="/api/v1", tags=["Prompts"])
 
 @app.post('/seed')
 async def seed(payload: SeedPayload):

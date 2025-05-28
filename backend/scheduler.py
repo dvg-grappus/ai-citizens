@@ -10,15 +10,7 @@ from postgrest.exceptions import APIError  # Import APIError
 # Use relative imports for consistency and to avoid issues if backend is run as a module
 from .config import get_settings
 from .llm import call_llm
-from .prompts import (
-    PLAN_SYSTEM_PROMPT_TEMPLATE,
-    PLAN_USER_PROMPT_TEMPLATE,
-    REFLECTION_SYSTEM_PROMPT_TEMPLATE,
-    REFLECTION_USER_PROMPT_TEMPLATE,
-    DIALOGUE_SYSTEM_PROMPT_TEMPLATE,
-    DIALOGUE_USER_PROMPT_TEMPLATE,
-    format_traits,
-)
+from .prompts import format_traits
 from .memory_service import retrieve_memories, get_embedding
 from .services import supa, execute_supabase_query, get_area_details
 from .websocket_utils import register_ws, unregister_ws, broadcast_ws_message
@@ -224,6 +216,10 @@ async def advance_tick():
                             print( # This is an existing, useful log
                                 f"[DialogueCheck] SUCCESS: Random chance (50%) passed for {npc1_name} and {npc2_name}. Adding dialogue request."
                             )
+                            # Fetch area details to get area_name
+                            area_details = await get_area_details(npc1_area_id) # npc1_area_id is the ID of the area they are in
+                            current_area_name = area_details.get("name", "an unknown location") if area_details else "an unknown location"
+
                             # REMOVED: print(f"ADVANCE_TICK: Before add_dialogue_request_ext for {npc1_name} and {npc2_name}.")
                             await add_dialogue_request_ext(
                                 npc_a_id=npc1_id,
@@ -232,8 +228,9 @@ async def advance_tick():
                                 npc_b_name=npc2_name,
                                 npc_a_traits=npc1_data.get("traits", []),
                                 npc_b_traits=npc2_data.get("traits", []),
-                                trigger_event=f"saw {npc2_name} in their current area", # Simplified for now
+                                trigger_event=f"saw {npc2_name} in {current_area_name}", # Use fetched area name
                                 current_tick=current_sim_minutes_total,
+                                area_name=current_area_name # Pass area_name
                             )
                             # REMOVED: print(f"ADVANCE_TICK: After add_dialogue_request_ext for {npc1_name} and {npc2_name}.")
                         else:

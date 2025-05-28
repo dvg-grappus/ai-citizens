@@ -8,7 +8,11 @@ import httpx # ADD HTTPOX IMPORT FOR EXCEPTION HANDLING
 
 settings = get_settings()
 
-supa: Client = create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_KEY)
+# Initialize Supabase client
+if not settings.SUPABASE_URL or not settings.SUPABASE_SERVICE_ROLE_KEY: # Check the correct attribute
+    raise ValueError("Supabase URL and Service Role Key must be set in environment variables or .env file.")
+
+supa: Client = create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_ROLE_KEY) # Use the correct attribute
 
 # --- Semaphore and DB Execution Helper MOVED HERE ---
 MAX_CONCURRENT_DB_OPS = 5 
