@@ -80,7 +80,13 @@ async def spawn_random_challenge(current_sim_minutes_total: int, current_day: in
             if affected:
                 from .planning_and_reflection import run_replanning
                 for npc_id in affected:
-                    await run_replanning(npc_id, {"description": challenge["effect_desc"]}, current_sim_minutes_total)
+                    # Construct new event_info for replanning after a challenge
+                    event_info = {
+                        "source": "challenge",
+                        "challenge_code": challenge.get("code", "unknown_challenge"), # e.g., "pizza_drop"
+                        "original_description": challenge.get("effect_desc", "A challenge occurred!")
+                    }
+                    await run_replanning(npc_id, event_info, current_sim_minutes_total)
         else:
             error_info = "No data returned from insert"
             if hasattr(event_response_obj, "error") and event_response_obj.error:

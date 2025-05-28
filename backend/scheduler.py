@@ -107,6 +107,9 @@ async def get_current_sim_time_and_day() -> Dict[str, int]:
 
 async def advance_tick():
     try:
+        # REMOVED: current_time_data = await get_current_sim_time_and_day()
+        # REMOVED: print(f"ADVANCE_TICK: === Called === Current sim time: Day {current_time_data['day']}, Min {current_time_data['sim_min']}")
+
         # print("DEBUG: advance_tick - Top of tick") # Silenced
         time_data_before_tick_res = await execute_supabase_query(
             lambda: supa.table("sim_clock")
@@ -135,6 +138,7 @@ async def advance_tick():
         time_update_response = await execute_supabase_query(
             lambda: supa.rpc("increment_sim_min", rpc_params).execute()
         )
+        # REMOVED: print(f"ADVANCE_TICK: RPC increment_sim_min response: {time_update_response.data}")
 
         if not (
             time_update_response
@@ -151,6 +155,7 @@ async def advance_tick():
         actual_current_day = new_time_data.get("new_day")
 
         if new_sim_min_of_day is None or actual_current_day is None:
+            # REMOVED: print(f"ADVANCE_TICK: Returning early - new_sim_min_of_day or actual_current_day is None. Min: {new_sim_min_of_day}, Day: {actual_current_day}")
             return  # Should have data from RPC
         # print(f"Tick  END : Day {actual_current_day}, Min {new_sim_min_of_day} (RPC successful)") # REMOVE
 
@@ -171,6 +176,7 @@ async def advance_tick():
         )
         all_areas_data_for_tick = all_areas_res.data or []
 
+        # REMOVED: print(f"ADVANCE_TICK: Before update_npc_actions_and_state. Current Time: Day {actual_current_day}, Min {new_sim_min_of_day}")
         await update_npc_actions_and_state(
             all_npcs_data,
             current_sim_minutes_total,
@@ -178,20 +184,14 @@ async def advance_tick():
             new_sim_min_of_day,
             all_areas_data_for_tick,
         )
+        # REMOVED: print(f"ADVANCE_TICK: After update_npc_actions_and_state. Current Time: Day {actual_current_day}, Min {new_sim_min_of_day}")
 
         # --- Start Dialogue Encounter Detection & Initiation ---
-        # Check for NPC encounters to initiate dialogues
-        # Make sure all_npcs_data is current after update_npc_actions_and_state might have changed positions
-        # Re-fetch might be too slow, assume all_npcs_data passed to update_npc_actions_and_state is sufficient
-        # OR, update_npc_actions_and_state should return the modified all_npcs_data if positions changed.
-        # For now, we'll use the all_npcs_data fetched at the start of the tick. This might mean
-        # a dialogue is initiated based on positions *before* the wander/action movement of this tick.
-        # This is a potential refinement area if dialogues seem to trigger for NPCs that just moved apart.
-
+        # REMOVED: print(f"ADVANCE_TICK: --- Starting Dialogue Encounter Detection --- Day {actual_current_day}, Min {new_sim_min_of_day}")
         if len(all_npcs_data) >= 2:
-            # print(f"[DialogueCheck] Tick {current_sim_minutes_total}: Evaluating {len(all_npcs_data)} NPCs for dialogue.") # REMOVED THIS LOG
-            # Randomly select two different NPCs
+            # REMOVED: print(f"ADVANCE_TICK: Sufficient NPCs ({len(all_npcs_data)}) for dialogue check.")
             npc1_data, npc2_data = random.sample(all_npcs_data, 2)
+            # REMOVED: print(f"ADVANCE_TICK: Selected NPCs for potential dialogue: {npc1_data.get('name', 'N/A')} and {npc2_data.get('name', 'N/A')}.")
 
             npc1_id = npc1_data["id"]
             npc1_name = npc1_data.get("name", "NPC1")
@@ -204,67 +204,56 @@ async def advance_tick():
             npc2_area_id = npc2_pos_data.get("areaId")
 
             if npc1_area_id == npc2_area_id:
-                # print(f"[DialogueCheck] NPCs {npc1_name} and {npc2_name} are in the same area: {npc1_area_id}.") # Too verbose
+                # REMOVED: print(f"ADVANCE_TICK: NPCs {npc1_name} and {npc2_name} in same area {npc1_area_id}.")
                 distance = math.sqrt(
                     (npc1_pos_data["x"] - npc2_pos_data["x"]) ** 2
                     + (npc1_pos_data["y"] - npc2_pos_data["y"]) ** 2
                 )
 
                 if distance < 10000:  # Effectively same-area check now
-                    # print(f"[DialogueCheck] NPCs {npc1_name} and {npc2_name} are close enough (dist: {distance:.2f} < 10000).") # Too verbose
-
-                    # ---- START NEW COOLDOWN CHECK from dialogue_service ----
+                    # REMOVED: print(f"ADVANCE_TICK: NPCs {npc1_name} and {npc2_name} are close enough (dist: {distance:.2f}).")
+                    # REMOVED: print(f"ADVANCE_TICK: Checking cooldown for {npc1_name} and {npc2_name}.")
                     if await are_npcs_on_cooldown(
                         npc1_id, npc2_id, current_sim_minutes_total
                     ):
-                        # print(f"[DialogueCheck] NPCs {npc1_name} & {npc2_name} on cooldown (checked by scheduler). Skipping further checks.") # Optional: verbose log
-                        return  # Skip to next pair if on cooldown
-                    # ---- END NEW COOLDOWN CHECK ----
-
-                    if random.random() < 0.50:
-                        print(
-                            f"[DialogueCheck] SUCCESS: Random chance (50%) passed for {npc1_name} and {npc2_name}. Adding dialogue request."
-                        )
-
-                        # Prepare additional arguments for add_pending_dialogue_request
-                        npc1_traits = npc1_data.get("traits", [])
-                        npc2_traits = npc2_data.get("traits", [])
-                        area_name_for_trigger = (
-                            "their current area"  # Placeholder, ideally fetch area name
-                        )
-                        if npc1_area_id:  # Try to get a more specific area name
-                            area_details = await get_area_details(
-                                npc1_area_id
-                            )  # Assuming get_area_details can fetch by ID
-                            if area_details and area_details.get("name"):
-                                area_name_for_trigger = area_details.get("name")
-
-                        trigger_event = f"saw {npc2_name} in {area_name_for_trigger}"  # From NPC1's perspective
-
-                        await add_dialogue_request_ext(
-                            npc_a_id=npc1_id,
-                            npc_b_id=npc2_id,
-                            npc_a_name=npc1_name,
-                            npc_b_name=npc2_name,
-                            npc_a_traits=npc1_traits,
-                            npc_b_traits=npc2_traits,
-                            trigger_event=trigger_event,
-                            current_tick=current_sim_minutes_total,
-                        )
+                        # REMOVED: print(f"ADVANCE_TICK: NPCs {npc1_name} & {npc2_name} on cooldown. Skipping dialogue attempt.")
+                        pass # Intentionally do nothing if on cooldown, let tick continue for other NPCs/processes
                     else:
-                        print(
-                            f"[DialogueCheck] FAILED: Random chance (50%) for {npc1_name} and {npc2_name}."
-                        )
-                else:
+                        # REMOVED: print(f"ADVANCE_TICK: NPCs {npc1_name} & {npc2_name} NOT on cooldown.")
+                        if random.random() < 0.50:
+                            print( # This is an existing, useful log
+                                f"[DialogueCheck] SUCCESS: Random chance (50%) passed for {npc1_name} and {npc2_name}. Adding dialogue request."
+                            )
+                            # REMOVED: print(f"ADVANCE_TICK: Before add_dialogue_request_ext for {npc1_name} and {npc2_name}.")
+                            await add_dialogue_request_ext(
+                                npc_a_id=npc1_id,
+                                npc_b_id=npc2_id,
+                                npc_a_name=npc1_name,
+                                npc_b_name=npc2_name,
+                                npc_a_traits=npc1_data.get("traits", []),
+                                npc_b_traits=npc2_data.get("traits", []),
+                                trigger_event=f"saw {npc2_name} in their current area", # Simplified for now
+                                current_tick=current_sim_minutes_total,
+                            )
+                            # REMOVED: print(f"ADVANCE_TICK: After add_dialogue_request_ext for {npc1_name} and {npc2_name}.")
+                        else:
+                            print( # This is an existing, useful log
+                                f"[DialogueCheck] FAILED: Random chance (50%) for {npc1_name} and {npc2_name}."
+                            )
+                else: # This is an existing, useful log
                     print(
                         f"[DialogueCheck] FAILED: NPCs {npc1_name} and {npc2_name} are too far apart (dist: {distance:.2f})."
                     )
-            # else:
-            # print(f"[DialogueCheck] NPCs {npc1_name} and {npc2_name} are in different areas.")
-        # --- End Dialogue Encounter Detection & Initiation ---
+            # else: # This was a commented out print, so it's fine
+                # REMOVED: print(f"ADVANCE_TICK: NPCs {npc1_name} and {npc2_name} are in different areas.")
+        # else:
+            # REMOVED: print(f"ADVANCE_TICK: Not enough NPCs ({len(all_npcs_data)}) for dialogue check.")
+        # REMOVED: print(f"ADVANCE_TICK: --- Finished Dialogue Encounter Detection --- Day {actual_current_day}, Min {new_sim_min_of_day}")
 
         # Process pending dialogues using the external service
+        # REMOVED: print(f"ADVANCE_TICK: Before process_dialogues_ext. Current Time: Day {actual_current_day}, Min {new_sim_min_of_day}")
         await process_dialogues_ext(current_sim_minutes_total)
+        # REMOVED: print(f"ADVANCE_TICK: After process_dialogues_ext. Current Time: Day {actual_current_day}, Min {new_sim_min_of_day}")
 
         # MODIFIED: Split reflection and planning into separate conditions
         # Run reflections at midnight (start of day)
@@ -300,18 +289,22 @@ async def advance_tick():
                 new_sim_min_of_day,
             )
 
+        # REMOVED: print(f"ADVANCE_TICK: Before spawn_random_challenge. Current Time: Day {actual_current_day}, Min {new_sim_min_of_day}")
         await spawn_random_challenge(current_sim_minutes_total, actual_current_day)
+        # REMOVED: print(f"ADVANCE_TICK: After spawn_random_challenge. Current Time: Day {actual_current_day}, Min {new_sim_min_of_day}")
 
         # Observation Logging (simplified log for now)
         # print(f"  Observation logging for Day {actual_current_day} - {new_sim_min_of_day // 60:02d}:{new_sim_min_of_day % 60:02d}") # REMOVE
 
         # 5. WebSocket broadcast
+        # REMOVED: print(f"ADVANCE_TICK: Before broadcast_ws_message. Current Time: Day {actual_current_day}, Min {new_sim_min_of_day}")
         await broadcast_ws_message(
             "tick_update",
             {"new_sim_min": new_sim_min_of_day, "new_day": actual_current_day},
         )
+        # REMOVED: print(f"ADVANCE_TICK: === Completed === New sim time: Day {actual_current_day}, Min {new_sim_min_of_day}")
     except Exception as e_adv_tick:
-        print(f"CRITICAL ERROR in advance_tick: {e_adv_tick}")
+        print(f"CRITICAL ERROR in advance_tick: {e_adv_tick}") # Keep this critical error log
         import traceback
 
         traceback.print_exc()
@@ -323,6 +316,7 @@ async def _loop():
     loop_count = 0
     while True:
         loop_count += 1
+        # REMOVED: print(f"SCHEDULER_LOOP: Iteration {loop_count} START")
         try:
             await asyncio.sleep(settings.TICK_REAL_SEC)
             await advance_tick()
@@ -330,6 +324,7 @@ async def _loop():
             #     print(f"--- NPC Status Update (Tick {loop_count}) ---")
             #     # ... (rest of status log logic)
             #     print("-------------------------------------")
+            # REMOVED: print(f"SCHEDULER_LOOP: Iteration {loop_count} END, TICK_REAL_SEC: {settings.TICK_REAL_SEC}")
         except Exception as e_loop:
             print(f"CRITICAL ERROR IN _loop: {e_loop}")  # KEEP
             import traceback

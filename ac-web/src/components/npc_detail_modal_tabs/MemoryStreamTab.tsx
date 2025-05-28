@@ -111,7 +111,7 @@ const MemoryStreamTab: React.FC<MemoryStreamTabProps> = ({ memoryStream }) => {
                                         {memory.time || 'Unknown time'}
                                     </div>
                                     <div>
-                                        {memoryType === 'reflect' || memoryType === 'plan' || memoryType === 'dialogue_summary' ? (
+                                        {memoryType === 'reflect' || memoryType === 'plan' || memoryType === 'replan' || memoryType === 'dialogue_summary' ? (
                                             <span style={tagStyles[memoryType as keyof typeof tagStyles] || tagStyles.other}>
                                                 {memoryType === 'dialogue_summary' ? 'Dialogue' : memoryType.charAt(0).toUpperCase() + memoryType.slice(1)}
                                             </span>

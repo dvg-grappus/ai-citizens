@@ -115,6 +115,14 @@ export const tagStyles: { [key: string]: React.CSSProperties } = {
         fontSize: '0.7em',
         marginRight: '6px',
     },
+    replan: {
+        backgroundColor: '#FF69B4',
+        color: 'white',
+        padding: '2px 6px',
+        borderRadius: '4px',
+        fontSize: '0.7em',
+        marginRight: '6px',
+    },
     other: {
         backgroundColor: '#7f8c8d',
         color: 'white',

@@ -214,6 +214,8 @@ async def trigger_seed_script():
 class UserEventRequest(BaseModel):
     message: str
     enhance: bool = True
+    # Add event_type as an optional field to the request model for future use if desired
+    # event_type: Optional[str] = "custom" 
 
 @app.post("/trigger_user_event")
 async def trigger_user_event(request: UserEventRequest):
@@ -313,7 +315,15 @@ Add appropriate emoji if relevant."""
 
             from .planning_and_reflection import run_replanning
             for npc_id in affected_npcs:
-                await run_replanning(npc_id, {'description': final_message}, current_sim_minutes_total)
+                event_info = {
+                    "source": "user_event",
+                    # Since UserEventRequest doesn't have event_type, we provide a default.
+                    # The run_replanning function will default to "custom" if this is missing,
+                    # but being explicit here is also fine.
+                    "user_event_type": "general_user_event", 
+                    "original_description": final_message 
+                }
+                await run_replanning(npc_id, event_info, current_sim_minutes_total)
             
             return {
                 "status": "success",

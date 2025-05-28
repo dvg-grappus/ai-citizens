@@ -241,7 +241,11 @@ async def run_nightly_reflection(day_being_reflected: int, current_sim_minutes_t
 
 async def run_replanning(npc_id: str, event_info: Dict, current_sim_min: int) -> None:
     """Replan the remainder of the day for a single NPC based on an event."""
+    npc_name_for_logging = f"NPC ID {npc_id}" 
     try:
+        original_event_description = event_info.get("original_description", event_info.get("description", "Unknown event"))
+        print(f"REPLANNING: Initiated for {npc_name_for_logging} due to event: {original_event_description}")
+
         npc_res = await execute_supabase_query(
             lambda: supa.table("npc")
             .select("name, traits")
@@ -250,10 +254,28 @@ async def run_replanning(npc_id: str, event_info: Dict, current_sim_min: int) ->
             .execute()
         )
         if not npc_res or not npc_res.data:
+            print(f"REPLANNING: NPC data not found for {npc_id}. Aborting replan.")
             return
 
-        npc_name = npc_res.data.get("name")
+        npc_name = npc_res.data.get("name", npc_id)
+        npc_name_for_logging = npc_name
         npc_traits = npc_res.data.get("traits", [])
+        print(f"REPLANNING: Fetched NPC details for {npc_name}.")
+
+        # Fetch all available action definitions to guide the LLM
+        all_action_defs_response = await execute_supabase_query(lambda: supa.table('action_def').select('id, title, base_minutes').execute())
+        if not (all_action_defs_response and all_action_defs_response.data):
+            print(f"REPLANNING: Could not fetch action definitions for {npc_name}. Aborting replan.")
+            return
+        action_defs_data = all_action_defs_response.data
+        # For matching LLM output to action_def IDs later
+        defs_by_id = {d["id"]: d for d in action_defs_data}
+        # For providing LLM with a list of valid action titles
+        valid_action_titles = [ad['title'] for ad in action_defs_data if ad.get('title')]
+        if not valid_action_titles:
+            print(f"REPLANNING: No valid action titles found in action_def table for {npc_name}. Aborting replan.")
+            return
+        valid_actions_list_str = ", ".join(f'\"{title}\"' for title in valid_action_titles)
 
         current_day = (current_sim_min // SIM_DAY_MINUTES) + 1
         sim_min_of_day = current_sim_min % SIM_DAY_MINUTES
@@ -267,15 +289,11 @@ async def run_replanning(npc_id: str, event_info: Dict, current_sim_min: int) ->
             .execute()
         )
         if not plan_res or not plan_res.data:
+            print(f"REPLANNING: No existing plan found for {npc_name} for Day {current_day}. Aborting replan.")
             return
 
         plan_id = plan_res.data["id"]
         existing_action_ids = plan_res.data.get("actions") or []
-
-        action_defs_res = await execute_supabase_query(
-            lambda: supa.table("action_def").select("id, title, base_minutes").execute()
-        )
-        defs_by_id = {d["id"]: d for d in (action_defs_res.data or [])}
 
         action_instances_res = None
         if existing_action_ids:
@@ -300,20 +318,26 @@ async def run_replanning(npc_id: str, event_info: Dict, current_sim_min: int) ->
                     keep_action_ids.append(inst["id"])
 
         remaining_plan_desc = "; ".join(remaining_action_lines) if remaining_action_lines else "None"
+        print(f"REPLANNING: For {npc_name}, current time {sim_min_of_day // 60:02d}:{sim_min_of_day % 60:02d}. Remaining plan: [{remaining_plan_desc}]")
 
         decision_system = f"You control NPC {npc_name}."
         decision_user = (
-            f"Current time: {sim_min_of_day // 60:02d}:{sim_min_of_day % 60:02d}.\n"
-            f"Upcoming plan: {remaining_plan_desc}.\n"
-            f"Event: {event_info.get('description', '')}.\n"
+            f"Current time: {sim_min_of_day // 60:02d}:{sim_min_of_day % 60:02d}.\\n"
+            f"Upcoming plan: {remaining_plan_desc}.\\n"
+            f"Event: {original_event_description}.\\n"
             "Should you create a new plan for the rest of the day? Answer Yes or No."
         )
 
-        decision_raw = call_llm(decision_system, decision_user, max_tokens=5)
-        if not (decision_raw and decision_raw.strip().lower().startswith("y")):
-            return
+        print(f"REPLANNING: Asking LLM if {npc_name} should replan. Event details: {original_event_description}")
+        decision_raw = call_llm(decision_system, decision_user, max_tokens=10)
 
-        memory_query = event_info.get("description", "recent event")
+        if not decision_raw or not decision_raw.strip().lower().startswith("y"):
+            print(f"REPLANNING: LLM decided NOT to replan for {npc_name}. LLM response: '{decision_raw}'. Aborting replan.")
+            return
+        
+        print(f"REPLANNING: LLM decided YES to replan for {npc_name}. LLM response: '{decision_raw}'. Proceeding to generate new plan.")
+
+        memory_query = original_event_description 
         retrieved = await retrieve_memories(npc_id, memory_query, "planning", current_sim_min)
 
         system_prompt = PLAN_SYSTEM_PROMPT_TEMPLATE.format(
@@ -322,33 +346,67 @@ async def run_replanning(npc_id: str, event_info: Dict, current_sim_min: int) ->
             traits_summary=format_traits(npc_traits),
         )
         user_prompt = (
-            f"You must create a revised schedule starting from {sim_min_of_day // 60:02d}:{sim_min_of_day % 60:02d} because: {event_info.get('description', '')}.\n"
-            f"Use only valid actions. Format each as HH:MM — <ACTION_TITLE>.\n"
-            f"CONTEXT:\n{retrieved}"
+            f"You must create a revised schedule starting from {sim_min_of_day // 60:02d}:{sim_min_of_day % 60:02d} because: {original_event_description}.\\n"
+            f"IMPORTANT: You MUST choose actions EXCLUSIVELY from the following list of valid action titles: [{valid_actions_list_str}].\\n"
+            f"Format each chosen action as HH:MM — <ACTION_TITLE>. Do not include any other text before or after the list of actions.\\n"
+            f"CONTEXT:\\n{retrieved}"
         )
 
-        raw_plan_text = call_llm(system_prompt, user_prompt, max_tokens=300)
+        print(f"REPLANNING: Calling LLM to generate new plan for {npc_name}. Context based on: '{memory_query}'. Valid actions provided: {valid_actions_list_str}")
+        raw_plan_text = call_llm(system_prompt, user_prompt, max_tokens=400) # Increased max_tokens slightly for longer action list
+
         if not raw_plan_text:
+            print(f"REPLANNING: LLM failed to generate a new plan for {npc_name}. Aborting replan.")
             return
+        
+        print(f"REPLANNING: LLM generated raw plan for {npc_name}:\\n{raw_plan_text}")
 
         new_action_ids = []
         parsed_actions_for_log = []
-        for line in raw_plan_text.strip().split("\n"):
-            match = re.fullmatch(r"(?:\d+\.\s*)?(\d{2}):(\d{2})\s*[-—–]\s*(.+)", line.strip())
+        # Retrieve action_defs_map_title_to_id for parsing, similar to run_daily_planning
+        action_defs_map_title_to_id = {ad['title']: ad['id'] for ad in action_defs_data if ad.get('title')}
+
+        # Use splitlines() for more robust line splitting from LLM output
+        for line in raw_plan_text.splitlines():
+            # Simpler regex focusing on the em-dash, and ensuring spaces are handled flexibly.
+            # Original: r"(?:\d+\.\s*)?(\d{2}):(\d{2})\s*[-—–]\s*(.+)"
+            match = re.fullmatch(r"(?:\d+\.\s*)?(\d{2}):(\d{2})\s*—\s*(.+)", line.strip())
             if not match:
+                # Add a log for lines that don't match the expected HH:MM - Action format
+                if line.strip(): # Only log non-empty, non-matching lines
+                    print(f"      REPLANNING Debug ({npc_name}): Skipping unparseable line: '{line.strip()}'")
                 continue
             hh, mm, title_raw = match.groups()
-            title = title_raw.strip()
-            def_row = next((d for d in defs_by_id.values() if d.get("title") == title), None)
-            if not def_row:
+            action_title_from_llm = title_raw.strip()
+            # Attempt to strip leading/trailing quotes that LLM might have included from the prompt examples
+            action_title_cleaned = action_title_from_llm.strip('"').strip("'")
+            
+            action_def_id = action_defs_map_title_to_id.get(action_title_cleaned) 
+
+            if not action_def_id:
+                # Log both the raw and cleaned versions for debugging
+                print(f"      REPLANNING Warning ({npc_name}): Action title '{action_title_cleaned}' (raw: '{action_title_from_llm}') not found in action_def_map or is invalid. Skipping.")
                 continue
-            duration_min = def_row.get("base_minutes", 30)
+            
+            # Get duration from the initially fetched defs_by_id or action_defs_data
+            # We need a map from ID to duration if not already present
+            action_defs_map_id_to_duration = {ad['id']: ad.get('base_minutes', 30) for ad in action_defs_data if ad.get('id')}
+            duration_min = action_defs_map_id_to_duration.get(action_def_id, 30)
+            
             start_min = int(hh) * 60 + int(mm)
             if start_min < sim_min_of_day:
+                print(f"      REPLANNING Warning ({npc_name}): Action '{action_title_cleaned}' at {hh}:{mm} is before current time. Skipping.")
                 continue
+            
+            # Object ID assignment logic (simplified example, adapt from run_daily_planning if complex objects are needed for replanned actions)
+            object_id_for_action = None 
+            # Example: if action_title == "Work": find PC object_id
+            # This part might need to be more robust if replanned actions often require specific objects
+
             action_payload = {
                 "npc_id": npc_id,
-                "def_id": def_row["id"],
+                "def_id": action_def_id,
+                "object_id": object_id_for_action, 
                 "start_min": start_min,
                 "duration_min": duration_min,
                 "status": "queued",
@@ -360,16 +418,27 @@ async def run_replanning(npc_id: str, event_info: Dict, current_sim_min: int) ->
                 new_id = insert_res.data[0].get("id")
                 if new_id:
                     new_action_ids.append(new_id)
-                    parsed_actions_for_log.append(f"{hh}:{mm} - {title}")
+                    parsed_actions_for_log.append(f"{hh}:{mm} - {action_title_cleaned}")
+                else:
+                    print(f"        REPLANNING: Inserted action '{action_title_cleaned}' for {npc_name} but ID not in response: {insert_res.data}")
+            else:
+                db_error = getattr(insert_res, 'error', None)
+                print(f"        REPLANNING: Failed to insert action '{action_title_cleaned}' for {npc_name}. Error: {db_error}. Data: {insert_res.data}")
 
         if new_action_ids:
-            if remaining_action_lines:
-                await execute_supabase_query(
-                    lambda: supa.table("action_instance")
-                    .delete()
-                    .in_("id", [inst_id for inst_id in existing_action_ids if inst_id not in keep_action_ids])
-                    .execute()
-                )
+            print(f"REPLANNING: Successfully parsed {len(parsed_actions_for_log)} new actions for {npc_name}.")
+            if remaining_action_lines: 
+                actions_to_delete = [inst_id for inst_id in existing_action_ids if inst_id not in keep_action_ids]
+                if actions_to_delete:
+                    print(f"REPLANNING: Deleting {len(actions_to_delete)} old actions for {npc_name}.")
+                    await execute_supabase_query(
+                        lambda: supa.table("action_instance")
+                        .delete()
+                        .in_("id", actions_to_delete)
+                        .execute()
+                    )
+                else:
+                    print(f"REPLANNING: No old actions to delete for {npc_name} as new plan starts after previous one or previous was empty.")
 
             updated_ids = keep_action_ids + new_action_ids
             await execute_supabase_query(
@@ -379,10 +448,29 @@ async def run_replanning(npc_id: str, event_info: Dict, current_sim_min: int) ->
                 .execute()
             )
 
+            replan_reason_display = "[Unspecified Event]"
+            event_source = event_info.get("source")
+
+            if event_source == "dialogue":
+                partner_name = event_info.get("partner_name", "Unknown")
+                replan_reason_display = f"[Dialogue with {partner_name}]"
+            elif event_source == "challenge":
+                challenge_code = event_info.get("challenge_code", "Unknown")
+                replan_reason_display = f"[Challenge: {challenge_code}]"
+            elif event_source == "user_event":
+                user_event_type = event_info.get("user_event_type", "custom").lower()
+                if "environment" in user_event_type or "disturbance" in user_event_type:
+                    replan_reason_display = "[Environment Event]"
+                else:
+                    replan_reason_display = "[External User Event]"
+            elif not event_source and original_event_description != "Unknown event" and original_event_description != "an unspecified event":
+                 replan_reason_display = f"[Event: {original_event_description[:30]}{(len(original_event_description)>30 and '...') or ''}]"
+
             mem_content = (
-                f"Replanned on Day {current_day} at {sim_min_of_day // 60:02d}:{sim_min_of_day % 60:02d}: "
-                f"{'; '.join(parsed_actions_for_log)}"
+                f"Replanned on Day {current_day} at {sim_min_of_day // 60:02d}:{sim_min_of_day % 60:02d} due to: {replan_reason_display}. "
+                f"New plan: {'; '.join(parsed_actions_for_log)}"
             )
+            
             emb = await get_embedding(mem_content)
             if emb:
                 mem_payload = {
@@ -390,12 +478,15 @@ async def run_replanning(npc_id: str, event_info: Dict, current_sim_min: int) ->
                     "sim_min": current_sim_min,
                     "kind": "replan",
                     "content": mem_content,
-                    "importance": 3,
+                    "importance": 3, 
                     "embedding": emb,
                 }
                 await execute_supabase_query(
                     lambda: supa.table("memory").insert(mem_payload).execute()
                 )
+                print(f"REPLANNING: Successfully saved 'replan' memory for {npc_name} with reason: {replan_reason_display}.")
+            else:
+                print(f"REPLANNING: Failed to get embedding for replan memory content for {npc_name}. 'replan' memory NOT saved.")
 
             await broadcast_ws_message(
                 "replan_event",
@@ -404,10 +495,15 @@ async def run_replanning(npc_id: str, event_info: Dict, current_sim_min: int) ->
                     "npc_name": npc_name,
                     "day": current_day,
                     "sim_min_of_day": sim_min_of_day,
+                    "replan_reason": replan_reason_display,
+                    "original_event": original_event_description
                 },
             )
+            print(f"REPLANNING: Completed and broadcasted replan_event for {npc_name}.")
+        else:
+            print(f"REPLANNING: No valid new actions were generated for {npc_name} from LLM output. No 'replan' memory created, plan NOT updated.")
 
     except Exception as e:
-        print(f"ERROR in run_replanning for NPC {npc_id}: {e}")
+        print(f"ERROR in run_replanning for {npc_name_for_logging}: {e}")
         traceback.print_exc()
 

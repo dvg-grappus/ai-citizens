@@ -160,8 +160,33 @@ export const useWS = () => {
                 }
                 // END - New handler for dialogue_event
 
+                // START - New handler for replan_event
+                else if (messageWrapper.type === 'replan_event' && messageWrapper.data) {
+                    const eventData = messageWrapper.data;
+                    let timeStr = "";
+                    if (eventData.sim_min_of_day !== undefined) {
+                        const hours = Math.floor(eventData.sim_min_of_day / 60).toString().padStart(2, '0');
+                        const minutes = (eventData.sim_min_of_day % 60).toString().padStart(2, '0');
+                        timeStr = `${hours}:${minutes}`;
+                    }
+                    pushLog(`🔄 REPLAN D${eventData.day || '-'} ${timeStr} ${eventData.npc_name} due to ${eventData.replan_reason}: ${eventData.original_event}`);
+
+                    if (
+                        apiUrl && 
+                        useSimStore.getState().isNPCDetailModalOpen &&
+                        useSimStore.getState().selectedNPCDetails &&
+                        typeof useSimStore.getState().selectedNPCDetails?.npc_id === 'string' && 
+                        useSimStore.getState().selectedNPCDetails?.npc_id === eventData.npc_id
+                    ) {
+                        setTimeout(() => {
+                            refreshNPCDetailModal(apiUrl);
+                        }, 500);
+                    }
+                }
+                // END - New handler for replan_event
+
             } catch (e) {
-                console.error('Error handling WebSocket message');
+                console.error('Error handling WebSocket message', e);
                 pushLog('Received malformed data from server.');
             }
         };

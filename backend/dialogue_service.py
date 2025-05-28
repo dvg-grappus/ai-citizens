@@ -212,8 +212,20 @@ async def process_pending_dialogues(current_sim_minutes_total: int) -> None:
             
             # Trigger replanning for both NPCs based on dialogue summary
             from .planning_and_reflection import run_replanning
-            await run_replanning(npc_a_id, {"description": summary_a}, current_sim_minutes_total)
-            await run_replanning(npc_b_id, {"description": summary_b}, current_sim_minutes_total)
+            # Construct new event_info for replanning after dialogue
+            event_info_a = {
+                "source": "dialogue",
+                "partner_name": npc_b_name,
+                "original_description": summary_a # The dialogue summary is the detailed description
+            }
+            await run_replanning(npc_a_id, event_info_a, current_sim_minutes_total)
+
+            event_info_b = {
+                "source": "dialogue",
+                "partner_name": npc_a_name,
+                "original_description": summary_b # The dialogue summary is the detailed description
+            }
+            await run_replanning(npc_b_id, event_info_b, current_sim_minutes_total)
         else: # No raw_dialogue_text
              print(f"    LLM call for dialogue between {npc_a_name} & {npc_b_name} returned no text.")
         
