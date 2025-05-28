@@ -83,10 +83,11 @@ create table memory (
   id uuid primary key default gen_random_uuid(),
   npc_id uuid references npc(id) on delete cascade,
   sim_min int,
-  kind text check (kind in ('plan','obs','reflect')),
+  kind text check (kind in ('plan','obs','reflect','dialogue_summary','replan')),
   content text,
   importance int,
-  embedding vector(1536)
+  embedding vector(1536),
+  metadata jsonb default '{}'
 );
 create index on memory using ivfflat (embedding vector_cosine_ops) with (lists = 100);
 -- Encounters
@@ -384,6 +385,45 @@ uvicorn backend.main:app --reload --port 8000
 
 This phase focuses on getting the backend structure, core services, and the main simulation loop operational. Detailed logic for each function (prompts, specific game mechanics) will be refined in subsequent phases or was part of the iterative development.
 
+### 2.X `planning_and_reflection.py` Enhancements
+
+This module is central to NPC cognition. Key aspects of its `run_replanning` function include:
+
+*   **Structured `event_info`**: The `run_replanning` function now expects a structured `event_info` dictionary as input. This dictionary should include:
+    *   `source`: A string indicating the origin of the event (e.g., "dialogue", "challenge", "user_event").
+    *   `original_description`: The detailed, raw description of the event. This is crucial for providing rich context to the LLM for its decision-making process (both whether to replan and how to replan).
+    *   Source-specific fields: Depending on the `source`, additional fields might be present (e.g., `partner_name` for dialogues, `challenge_code` for challenges, `user_event_type` for user-triggered events).
+*   **Categorized Replan Reason**: Based on the `event_info`, a categorized `replan_reason_display` string (e.g., "[Dialogue with Bob]", "[Challenge: pizza_drop]") is generated. This categorized reason is used in the content of the "replan" memory.
+*   **LLM Context for Plan Generation**:
+    *   When generating a new plan, the LLM is provided with the `original_description` of the event to ensure it has full context.
+    *   A list of all valid action titles (fetched from `action_def` table) is included in the prompt to the LLM. This helps reduce the likelihood of the LLM hallucinating invalid or non-existent actions.
+*   **Replanning Memory Content**: The `content` for "replan" type memories is structured as: `"Replanned on Day {D} at {HH:MM} due to: {Categorized Reason}. New plan: {action1_title; action2_title; ...}"`.
+*   **Action Parsing Robustness**: The parsing of LLM-generated plan text has been made more robust by:
+    *   Using `splitlines()` to handle various newline conventions.
+    *   Specifically matching the em-dash (`—`) as a delimiter between time and action title, with flexible whitespace handling.
+    *   Cleaning action titles by stripping potential leading/trailing quotes.
+
+### 2.X `websocket_utils.py` and Event Broadcasting
+
+The `broadcast_ws_message` function in `websocket_utils.py` is used to send various event updates to the frontend.
+
+*   **`replan_event`**: When an NPC successfully replans, a `replan_event` is broadcast. Its payload includes:
+    ```json
+    {
+      "npc_id": "string",          // ID of the NPC that replanned
+      "npc_name": "string",        // Name of the NPC
+      "day": "number",            // Current simulation day
+      "sim_min_of_day": "number",  // Current simulation minute of the day
+      "replan_reason": "string",    // Categorized reason, e.g., "[Dialogue with Alice]"
+      "original_event": "string"   // The detailed original event description
+    }
+    ```
+    The frontend uses this event to update its main log panel and can refresh UI elements like an open NPC Detail Modal to show the new plan/memory.
+
+### 2.Y Debugging Notes
+
+*   **Scheduler Tick Issues**: If the simulation clock appears to freeze or ticks behave erratically, detailed tick progression logs can be temporarily added to `scheduler.py`. Focus on the `_loop` function (for overall loop health) and the `advance_tick` function (for the stages within a single tick). Adding `print` statements before and after major `await` calls or logical blocks within `advance_tick` can help pinpoint where it might be stalling or exiting prematurely.
+
 ---
 
 Next → Phase 3 — Vite/React Frontend Skeleton & Basic UI
@@ -491,6 +531,20 @@ Next → Phase 3 — Vite/React Frontend Skeleton & Basic UI
     *   The log panel should display messages from the backend (e.g., "Tick processed", NPC actions).
     *   Clicking an NPC dot should open the `NPCDetailModal` showing that NPC's details.
     *   The modal should have tabs for Actions, Reflections, Plan, and Memory Stream, populating with data.
+
+### 3.X WebSocket Handling (`useWS.ts`)
+
+The `useWS.ts` hook manages the WebSocket connection and processes incoming messages.
+
+*   **Event Handling**: It includes handlers for various message types from the backend, such as `tick_update`, `sim_event`, `planning_event`, `reflection_event`, `action_start`, `social_event`, `dialogue_event`, and notably `replan_event`.
+*   **Log Panel Updates**: For each relevant event, a formatted message is pushed to a global Zustand store (`log` array), which is then displayed by the `LogPanel.tsx` component.
+*   **`replan_event` Display**: When a `replan_event` is received, it's formatted as: `"🔄 REPLAN D{day} {HH:MM} {NPC Name} due to {Categorized Reason}: {Original Event Description}"` and added to the log.
+*   **NPC Detail Modal Refresh**: If the NPC Detail Modal is open for an NPC that just had a `planning_event`, `reflection_event`, or `replan_event`, the modal's content is refreshed to reflect new plans or memories.
+
+### 3.Y NPC Detail Modal (`NPCDetailModal.tsx` & related files)
+
+*   **Memory Tagging**: The modal correctly displays memories of type "replan" with a distinct "Replan" tag.
+*   **Styling**: "Replan" tags are styled with a specific color (e.g., pink) for easy visual identification in the memory stream.
 
 ---
 
@@ -659,7 +713,7 @@ Throughout the project, significant effort was made to refactor and polish the c
     *   **File System**: Unused files (e.g., `src/assets/react.svg`, `App.css`, old test scripts) and empty directories were deleted. Project files like READMEs were organized into a `docs/` directory.
 *   **Bug Fixing & Stability**:
     *   Addressed numerous runtime errors, including `AttributeError`s (e.g., `_ws_clients`), `ValueError`s (e.g., reflection `kind`), `ImportError`s (missing service functions like `get_npc_by_id`, `save_memory_batch`).
-    *   Resolved critical backend issue of NPC ID instability after `/reset_simulation_to_end_of_day1`, which caused FK errors when saving memories. This involved ensuring `current_action_id` for NPCs is cleared on reset.
+    *   Resolved critical backend issue of NPC ID instability after `/reset_simulation_to_end_of_day1`, which caused FK errors when saving memories. This involved ensuring `current_action_id` is cleared on reset for NPCs.
     *   Implemented a retry mechanism with exponential backoff for `httpx.ReadError` in `backend/services.py` to handle Supabase connectivity issues.
 *   **Performance Optimization**:
     *   Optimized the `/npc_details/{npc_id}` endpoint (`get_npc_ui_details` in `services.py`) by fetching recent memories in a single call and processing in Python, reducing database load.

@@ -27,6 +27,7 @@ Artificial Citizens is a micro‑scale agent simulator: a living sandbox where e
    * **Plan** — daily schedule created around 5 AM.
    * **Observation** — timestamped events (“08:15 — Saw Bob enter Lounge”) including dialogue lines.
    * **Reflection** — nightly 3‑line digest with importance scores.
+   * **Replan** — Records of when an NPC's plan was changed mid-day, including the categorized reason (e.g., "[Dialogue with Bob]", "[User Event]").
    * Embeddings for memories are stored directly in the `memory` table using `pgvector`.
 6. **Retrieval Scoring** – `score = w_recency * Recency + w_importance * Importance + w_similarity * Similarity` (weights vary by query type: planning, reflection, dialogue) → top‑20 memories feed the next prompt.
 7. **Encounter & Dialogue System**
@@ -41,7 +42,7 @@ Artificial Citizens is a micro‑scale agent simulator: a living sandbox where e
 * **Canvas Stage** – black background, four named quadrants; coloured NPC dots with floating emoji, animated movement.
 * **Clock Overlay** – always‑visible day & time counter.
 * **Controls Panel** – *Currently conceptual, manual tick via API endpoint if needed.*
-* **Log Panel** – *Currently basic client-side logging; backend events/dialogues can be observed via WebSocket messages or database.*
+* **Log Panel** – Displays real-time backend events, including simulation ticks, NPC actions, dialogues, planning/reflection phases, and detailed replan events (NPC, time, reason).
 * **NPC Detail Modal** - Click an NPC to see their recent actions, plans, reflections, and memory stream.
 
 ---
@@ -85,13 +86,13 @@ A weekend‑scale proof‑of‑concept that demonstrates personality‑driven ag
         *   **Daily Planning** (`run_daily_planning`): Triggers around 5 AM sim-time. NPCs generate a plan for the current day, creating `action_instance` and `plan` records, and a `plan` memory.
         *   **Plan Adherence Observations**: At set times (e.g., noon, midnight), observations about plan adherence are created.
         *   **Random Challenges** (`spawn_random_challenge`): A chance each tick to trigger a global event (e.g., fire alarm), creating a `sim_event` record. NPCs may react to these events based on their logic.
-    *   **WebSocket Broadcast**: A `tick_update` message with the new sim time and day is broadcast to all connected clients. Additional tags like `planning_event`, `reflection_event`, and `replan_event` notify the frontend about planning, reflection, or mid-day replanning updates.
+    *   **WebSocket Broadcast**: A `tick_update` message with the new sim time and day is broadcast to all connected clients. Additional tags like `planning_event`, `reflection_event`, `sim_event`, and `replan_event` notify the frontend about planning, reflection, general simulation events, or mid-day replanning updates, including the categorized reason for replans.
 5.  **Frontend Updates**:
     *   Receives `tick_update` via WebSocket.
     *   Fetches full `/state` from the API (includes NPCs with current positions, emojis, areas, clock).
     *   Re-renders the `CanvasStage` with updated NPC positions and emojis.
     *   Updates the `ClockOverlay`.
-    *   Displays new dialogue turns or event messages (can be enhanced from current basic logging).
+    *   Displays new dialogue turns, simulation events (including detailed replan reasons), and other status messages in the main event log.
 
 ## 4. Data Model — Entities & Relationships
 
